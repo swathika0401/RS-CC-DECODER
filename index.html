@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -58,6 +59,7 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 12px;
             padding: 15px;
             margin: 10px 0;
             background: #f3f4f6;
@@ -66,9 +68,11 @@
 
         .file-name {
             font-weight: 600;
+            overflow-wrap: anywhere;
         }
 
         .download {
+            flex-shrink: 0;
             text-decoration: none;
             background: #2563eb;
             color: white;
@@ -81,16 +85,30 @@
             background: #1d4ed8;
         }
 
-        .empty {
-            color: #777;
-            font-size: 14px;
-        }
-
         footer {
             text-align: center;
             color: #777;
             margin-top: 30px;
             font-size: 14px;
+        }
+
+        @media (max-width: 500px) {
+            .container {
+                margin: 20px auto;
+                padding: 12px;
+            }
+
+            .header {
+                padding: 25px 15px;
+            }
+
+            .header h1 {
+                font-size: 25px;
+            }
+
+            .section {
+                padding: 18px;
+            }
         }
     </style>
 </head>
@@ -107,70 +125,45 @@
     <div class="section">
         <h2>💻 VHDL Code</h2>
 
-        <div class="file">
-            <span class="file-name">RS Decoder</span>
-            <a class="download" href="files/RS_decoder.vhd" download>
-                Download
-            </a>
-        </div>
-
-        <div class="file">
-            <span class="file-name">CC Decoder</span>
-            <a class="download" href="files/CC_decoder.vhd" download>
-                Download
-            </a>
-        </div>
-
-        <div class="file">
-            <span class="file-name">Top Module</span>
-            <a class="download" href="files/top.vhd" download>
-                Download
-            </a>
-        </div>
-
-        <div class="file">
-            <span class="file-name">Testbench</span>
-            <a class="download" href="files/testbench.vhd" download>
-                Download
-            </a>
-        </div>
-
-        <p class="empty">
-            More files will be added here as the project develops.
+        <p>
+            VHDL source files will be added here as the project develops.
         </p>
     </div>
-
 
     <div class="section">
         <h2>📚 Reference Material</h2>
 
         <div class="file">
-            <span class="file-name">RS Notes / PDF</span>
-            <a class="download" href="files/RS_notes.pdf" download>
-                Download
-            </a>
-        </div>
-
-        <div class="file">
-            <span class="file-name">CC Notes / PDF</span>
-            <a class="download" href="files/CC_notes.pdf" download>
+            <span class="file-name">RS + CC Decoder Project PDF</span>
+            <a class="download"
+               href="rs_cc_decoder_project.pdf"
+               download>
                 Download
             </a>
         </div>
     </div>
-
 
     <div class="section">
-        <h2>📦 Project Files</h2>
+        <h2>📝 My Documents</h2>
 
         <div class="file">
-            <span class="file-name">Complete Project ZIP</span>
-            <a class="download" href="files/RS_CC_Project.zip" download>
+            <span class="file-name">Design Notes</span>
+            <a class="download"
+               href="--%20DESIGN.txt"
+               download>
+                Download
+            </a>
+        </div>
+
+        <div class="file">
+            <span class="file-name">Testbench Notes</span>
+            <a class="download"
+               href="--%20testbench.txt"
+               download>
                 Download
             </a>
         </div>
     </div>
-
 
     <footer>
         Personal VHDL Workspace
