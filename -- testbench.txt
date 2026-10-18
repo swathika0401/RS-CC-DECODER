@@ -1,0 +1,2332 @@
+--> testbench.vhd
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_simple_test is
+end entity tb_simple_test;
+
+architecture sim of tb_simple_test is
+
+    signal rx_bits : std_logic_vector(27 downto 0);
+    signal decoded_bits : std_logic_vector(13 downto 0);
+
+    constant MESSAGE : std_logic_vector(13 downto 0) :=
+        "10110010000000";
+
+    constant CODEWORD : std_logic_vector(27 downto 0) :=
+        "1011011100001010000101001001";
+
+    -- RS clock and reset
+    signal rs_clk   : std_logic := '0';
+    signal rs_reset : std_logic := '1';
+
+    -- RS encoder signals
+    signal rs_enc_start : std_logic := '0';
+    signal rs_enc_busy  : std_logic;
+    signal rs_enc_done  : std_logic;
+    signal rs_data : std_logic_vector(1911 downto 0) :=
+        (others => '0');
+    signal rs_encoded : std_logic_vector(2039 downto 0);
+
+    -- RS decoder signals
+    signal rs_start : std_logic := '0';
+    signal rs_codeword : std_logic_vector(2039 downto 0) :=
+        (others => '0');
+    signal rs_busy : std_logic;
+    signal rs_done : std_logic;
+    signal rs_error_detect : std_logic;
+    signal rs_correction_valid : std_logic;
+    signal rs_corrected_codeword :
+        std_logic_vector(2039 downto 0);
+
+begin
+
+    -- Convolutional decoder
+    uut: entity work.viterbi_decoder
+        port map (
+            rx_bits => rx_bits,
+            decoded_bits => decoded_bits
+        );
+
+    -- RS clock
+    rs_clk <= not rs_clk after 5 ns;
+
+    -- Reference RS encoder
+    rs_encoder_inst: entity work.rs_reference_encoder
+        port map (
+            clk => rs_clk,
+            reset => rs_reset,
+            start => rs_enc_start,
+            data_in => rs_data,
+            codeword_out => rs_encoded,
+            busy => rs_enc_busy,
+            done => rs_enc_done
+        );
+
+    -- RS decoder
+    rs_unit: entity work.rs_decoder
+        port map (
+            clk => rs_clk,
+            reset => rs_reset,
+            start => rs_start,
+            codeword_in => rs_codeword,
+            codeword_out => rs_corrected_codeword,
+            busy => rs_busy,
+            done => rs_done,
+            error_detect => rs_error_detect,
+            correction_valid => rs_correction_valid
+        );
+
+    stimulus: process
+        variable cw : std_logic_vector(2039 downto 0);
+        variable original_cw : std_logic_vector(2039 downto 0);
+        variable data_vec : std_logic_vector(1911 downto 0);
+        variable error_count : integer;
+        variable timeout_count : integer;
+    begin
+
+        --------------------------------------------------
+        -- CC TEST 1: Clean codeword
+        --------------------------------------------------
+        rx_bits <= CODEWORD;
+        wait for 1 ns;
+
+        assert decoded_bits = MESSAGE
+            report "FAIL: clean CC codeword"
+            severity error;
+
+        if decoded_bits = MESSAGE then
+            report "PASS: clean CC codeword" severity note;
+        end if;
+
+        --------------------------------------------------
+        -- CC TEST 2: One-bit error
+        --------------------------------------------------
+        rx_bits <= CODEWORD;
+        rx_bits(27) <= not CODEWORD(27);
+        wait for 1 ns;
+
+        assert decoded_bits = MESSAGE
+            report "FAIL: CC one-bit error"
+            severity error;
+
+        if decoded_bits = MESSAGE then
+            report "PASS: CC one-bit error" severity note;
+        end if;
+
+        --------------------------------------------------
+        -- CC TEST 3: Two-bit errors
+        --------------------------------------------------
+        rx_bits <= CODEWORD;
+        rx_bits(27) <= not CODEWORD(27);
+        rx_bits(24) <= not CODEWORD(24);
+        wait for 1 ns;
+
+        assert decoded_bits = MESSAGE
+            report "FAIL: CC two-bit errors"
+            severity error;
+
+        if decoded_bits = MESSAGE then
+            report "PASS: CC two-bit errors" severity note;
+        end if;
+
+        report "CC tests completed" severity note;
+
+        --------------------------------------------------
+        -- Generate non-zero RS data
+        --------------------------------------------------
+        for i in 0 to 238 loop
+            data_vec(1911 - 8*i downto 1904 - 8*i) :=
+                std_logic_vector(
+                    to_unsigned((i*7 + 3) mod 256, 8)
+                );
+        end loop;
+
+        rs_data <= data_vec;
+
+        --------------------------------------------------
+        -- Reset encoder and decoder
+        --------------------------------------------------
+        rs_enc_start <= '0';
+        rs_start <= '0';
+        rs_reset <= '1';
+
+        wait until falling_edge(rs_clk);
+        wait until falling_edge(rs_clk);
+
+        rs_reset <= '0';
+        wait until falling_edge(rs_clk);
+
+        --------------------------------------------------
+        -- Encode non-zero message
+        --------------------------------------------------
+        rs_enc_start <= '1';
+
+        wait until falling_edge(rs_clk);
+        rs_enc_start <= '0';
+
+        timeout_count := 0;
+
+        while rs_enc_done /= '1' and timeout_count < 10 loop
+            wait until rising_edge(rs_clk);
+            wait for 0 ns;
+            timeout_count := timeout_count + 1;
+        end loop;
+
+        assert rs_enc_done = '1'
+            report "ERROR: RS encoder did not complete"
+            severity failure;
+
+        wait for 1 ns;
+        original_cw := rs_encoded;
+
+        assert original_cw /= (original_cw'range => '0')
+            report "FAIL: encoder produced an all-zero codeword"
+            severity error;
+
+        report "Reference encoder completed for non-zero data"
+            severity note;
+
+        report "Encoder output captured" severity note;
+
+        report "First encoded symbol = " &
+            integer'image(
+                to_integer(unsigned(original_cw(2039 downto 2032)))
+            )
+            severity note;
+
+        --------------------------------------------------
+        -- RS TEST 0: Clean non-zero codeword
+        --------------------------------------------------
+        rs_start <= '0';
+        rs_reset <= '1';
+        rs_codeword <= original_cw;
+
+        wait until falling_edge(rs_clk);
+        wait until falling_edge(rs_clk);
+
+        rs_reset <= '0';
+        wait until falling_edge(rs_clk);
+
+        rs_start <= '1';
+        wait until falling_edge(rs_clk);
+        rs_start <= '0';
+
+        wait until rs_done = '1';
+        wait for 1 ns;
+
+        if rs_error_detect = '0' and
+           rs_correction_valid = '1' and
+           rs_corrected_codeword = original_cw then
+
+            report "PASS: clean non-zero RS codeword"
+                severity note;
+        else
+            report "FAIL: clean non-zero RS codeword; error_detect=" &
+                   std_logic'image(rs_error_detect) &
+                   ", correction_valid=" &
+                   std_logic'image(rs_correction_valid)
+                severity error;
+        end if;
+
+        --------------------------------------------------
+        -- RS TESTS: 1, 2, 4 and 8 symbol errors
+        --------------------------------------------------
+        for test_no in 1 to 4 loop
+
+            case test_no is
+                when 1 => error_count := 1;
+                when 2 => error_count := 2;
+                when 3 => error_count := 4;
+                when others => error_count := 8;
+            end case;
+
+            rs_start <= '0';
+            rs_reset <= '1';
+            rs_codeword <= original_cw;
+
+            wait until falling_edge(rs_clk);
+            wait until falling_edge(rs_clk);
+
+            rs_reset <= '0';
+            wait until falling_edge(rs_clk);
+
+            -- Inject symbol errors
+            cw := original_cw;
+
+            for i in 0 to error_count - 1 loop
+                cw(2039 - 8*i downto 2032 - 8*i) :=
+                    cw(2039 - 8*i downto 2032 - 8*i) xor
+                    std_logic_vector(to_unsigned(i + 1, 8));
+            end loop;
+
+            rs_codeword <= cw;
+
+            wait until falling_edge(rs_clk);
+            rs_start <= '1';
+
+            wait until falling_edge(rs_clk);
+            rs_start <= '0';
+
+            wait until rs_done = '1';
+            wait for 1 ns;
+
+            assert rs_error_detect = '1'
+                report "FAIL: error not detected for " &
+                       integer'image(error_count) & " symbol errors"
+                severity error;
+
+            assert rs_correction_valid = '1'
+                report "FAIL: correction_valid for " &
+                       integer'image(error_count) & " symbol errors"
+                severity error;
+
+            assert rs_corrected_codeword = original_cw
+                report "FAIL: output mismatch for " &
+                       integer'image(error_count) & " symbol errors"
+                severity error;
+
+            if rs_correction_valid = '1' and
+               rs_corrected_codeword = original_cw then
+
+                report "PASS: corrected " &
+                       integer'image(error_count) &
+                       " symbol errors in non-zero codeword"
+                    severity note;
+            end if;
+
+        end loop;
+
+        report "All CC and non-zero RS tests completed"
+            severity note;
+
+        wait;
+    end process;
+
+end architecture sim;
+
+--> tb_tx_chain.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_tx_chain is
+end entity;
+
+architecture sim of tb_tx_chain is
+    signal clk       : std_logic := '0';
+    signal reset     : std_logic := '1';
+    signal start     : std_logic := '0';
+
+    signal data_in   : std_logic_vector(1911 downto 0)
+                       := (others => '0');
+    signal rs_word   : std_logic_vector(2039 downto 0)
+                       := (others => '0');
+    signal mixed     : std_logic_vector(2039 downto 0);
+    signal recovered : std_logic_vector(2039 downto 0);
+
+    signal busy      : std_logic;
+    signal done      : std_logic;
+begin
+
+    clk <= not clk after 5 ns;
+
+    -- RS encoder
+    rs_enc: entity work.rs_reference_encoder
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => start,
+            data_in      => data_in,
+            codeword_out => rs_word,
+            busy         => busy,
+            done         => done
+        );
+
+    -- Interleaver
+    intlv: entity work.interleaver
+        port map (
+            data_in  => rs_word,
+            data_out => mixed
+        );
+
+    -- Deinterleaver
+    deintlv: entity work.deinterleaver
+        port map (
+            data_in  => mixed,
+            data_out => recovered
+        );
+
+    stimulus: process
+    begin
+        report "Starting RS/interleaver chain test"
+            severity note;
+
+        -- Generate deterministic, non-zero input data
+        for i in 0 to 238 loop
+            data_in(1911 - 8*i downto 1904 - 8*i) <=
+                std_logic_vector(
+                    to_unsigned((i*7 + 3) mod 256, 8)
+                );
+        end loop;
+
+        -- Allow input data to settle
+        wait for 1 ns;
+
+        -- Reset encoder
+        reset <= '1';
+        wait until falling_edge(clk);
+        wait until falling_edge(clk);
+        reset <= '0';
+
+   -- Start encoding on a rising clock edge
+wait until rising_edge(clk);
+start <= '1';
+
+wait until rising_edge(clk);
+start <= '0';
+
+report "DEBUG: start pulse sent" severity note;
+
+-- Wait for completion, with timeout
+wait until done = '1' for 1 us;
+
+report "DEBUG: done=" & std_logic'image(done)
+    severity note;
+
+report "DEBUG: busy=" & std_logic'image(busy)
+    severity note;
+
+        if done /= '1' then
+            assert false
+                report "FAIL: RS encoder completion timeout"
+                severity failure;
+        end if;
+
+        -- Allow output signals to settle
+        wait for 1 ns;
+
+        assert rs_word /= (rs_word'range => '0')
+            report "FAIL: RS encoder output is zero"
+            severity failure;
+
+        assert recovered = rs_word
+            report "FAIL: interleaver/deinterleaver changed RS codeword"
+            severity failure;
+
+        report "PASS: RS encoder + interleaver + deinterleaver"
+            severity note;
+
+        wait;
+    end process;
+
+end architecture;
+
+--> tb_cc_viterbi.vhd
+
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use std.env.all;
+
+entity tb_cc_viterbi is
+end entity tb_cc_viterbi;
+
+architecture sim of tb_cc_viterbi is
+
+    constant DATA_BITS : positive := 14;
+    constant STEPS     : positive := DATA_BITS + 6;
+
+    signal clk       : std_logic := '0';
+    signal reset     : std_logic := '1';
+    signal data_in   : std_logic := '0';
+    signal valid_in  : std_logic := '0';
+
+    signal code_out  : std_logic_vector(1 downto 0);
+    signal valid_out : std_logic;
+
+    signal rx_bits : std_logic_vector(2*STEPS-1 downto 0)
+                     := (others => '0');
+
+    signal decoded : std_logic_vector(STEPS-1 downto 0)
+                     := (others => '0');
+
+    signal dec_start : std_logic := '0';
+    signal dec_busy  : std_logic;
+    signal dec_done  : std_logic;
+
+    constant MESSAGE : std_logic_vector(DATA_BITS-1 downto 0)
+                       := "10110010000000";
+
+    function bits_to_string(
+        v : std_logic_vector
+    ) return string is
+        variable s : string(1 to v'length);
+        variable k : integer := 1;
+    begin
+        for i in v'range loop
+            if v(i) = '0' then
+                s(k) := '0';
+            elsif v(i) = '1' then
+                s(k) := '1';
+            else
+                s(k) := 'X';
+            end if;
+            k := k + 1;
+        end loop;
+        return s;
+    end function;
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    enc: entity work.cc_encoder_ref
+        port map (
+            clk       => clk,
+            reset     => reset,
+            data_in   => data_in,
+            valid_in  => valid_in,
+            code_out  => code_out,
+            valid_out => valid_out
+        );
+
+    dec: entity work.viterbi_frame_decoder
+        generic map (
+            FRAME_BITS => STEPS
+        )
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => dec_start,
+            rx_bits      => rx_bits,
+            decoded_bits => decoded,
+            busy         => dec_busy,
+            done         => dec_done
+        );
+
+    stimulus: process
+        variable frame   : std_logic_vector(STEPS-1 downto 0);
+        variable encoded : std_logic_vector(2*STEPS-1 downto 0);
+    begin
+
+        report "Starting CC + Viterbi single-bit error test"
+            severity note;
+
+        frame := MESSAGE & "000000";
+
+        wait for 20 ns;
+        wait until falling_edge(clk);
+        reset <= '0';
+
+        -- Encode message and six zero tail bits
+        for i in 0 to STEPS-1 loop
+            data_in  <= frame(STEPS-1-i);
+            valid_in <= '1';
+
+            wait until rising_edge(clk);
+            wait for 1 ns;
+
+            assert valid_out = '1'
+                report "FAIL: encoder valid_out was not asserted"
+                severity failure;
+
+            encoded(2*STEPS-1-2*i downto
+                    2*STEPS-2-2*i) := code_out;
+
+            wait until falling_edge(clk);
+        end loop;
+
+        valid_in <= '0';
+
+        -- Inject one channel-bit error
+        encoded(10) := not encoded(10);
+
+        report "Single-bit channel error injected"
+            severity note;
+
+        -- Supply the corrupted encoded frame
+        rx_bits <= encoded;
+
+        wait until falling_edge(clk);
+        dec_start <= '1';
+
+        wait until falling_edge(clk);
+        dec_start <= '0';
+
+        -- Wait until Viterbi decoding is complete
+        wait until dec_done = '1';
+        wait for 1 ns;
+
+        report "Expected: " & bits_to_string(MESSAGE)
+            severity note;
+
+        report "Decoded : " &
+            bits_to_string(decoded(STEPS-1 downto 6))
+            severity note;
+
+        assert decoded(STEPS-1 downto 6) = MESSAGE
+            report "FAIL: decoded message differs from original"
+            severity failure;
+
+        assert decoded(5 downto 0) = "000000"
+            report "FAIL: tail bits were not recovered"
+            severity failure;
+
+        report "PASS: CC encoder + Viterbi decoder recovered message after one-bit error"
+            severity note;
+
+        stop;
+        wait;
+    end process;
+
+end architecture sim;
+
+
+--> tb_full_tx.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_full_tx is
+end entity;
+
+architecture sim of tb_full_tx is
+
+    signal clk      : std_logic := '0';
+    signal reset    : std_logic := '1';
+    signal start    : std_logic := '0';
+
+    signal data_in  : std_logic_vector(1911 downto 0)
+                      := (others => '0');
+
+    signal tx_bits  : std_logic_vector(4079 downto 0);
+    signal busy     : std_logic;
+    signal done     : std_logic;
+
+    -- Independent reference path
+    signal ref_rs_word : std_logic_vector(2039 downto 0);
+    signal ref_mixed   : std_logic_vector(2039 downto 0);
+
+    signal ref_rs_busy : std_logic;
+    signal ref_rs_done : std_logic;
+
+    signal ref_data  : std_logic := '0';
+    signal ref_valid : std_logic := '0';
+    signal ref_code  : std_logic_vector(1 downto 0);
+    signal ref_valid_out : std_logic;
+
+    signal ref_bits : std_logic_vector(4079 downto 0)
+                      := (others => '0');
+
+    signal ref_index : integer range 0 to 2040 := 0;
+    signal ref_count : integer range 0 to 2040 := 0;
+    signal ref_active : std_logic := '0';
+    signal ref_complete : std_logic := '0';
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    -- Transmitter under test
+    dut : entity work.tx_chain
+        port map (
+            clk     => clk,
+            reset   => reset,
+            start   => start,
+            data_in => data_in,
+            tx_bits => tx_bits,
+            busy    => busy,
+            done    => done
+        );
+
+    -- Reference RS encoder
+    ref_rs : entity work.rs_reference_encoder
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => start,
+            data_in      => data_in,
+            codeword_out => ref_rs_word,
+            busy         => ref_rs_busy,
+            done         => ref_rs_done
+        );
+
+    -- Reference interleaver
+    ref_int : entity work.interleaver
+        port map (
+            data_in  => ref_rs_word,
+            data_out => ref_mixed
+        );
+
+    -- Reference CC encoder
+    ref_cc : entity work.cc_encoder_ref
+        port map (
+            clk       => clk,
+            reset     => reset,
+            data_in   => ref_data,
+            valid_in  => ref_valid,
+            code_out  => ref_code,
+            valid_out => ref_valid_out
+        );
+
+    -- Reference serializer and output capture
+    process(clk)
+    begin
+        if rising_edge(clk) then
+
+            if reset = '1' then
+                ref_data     <= '0';
+                ref_valid    <= '0';
+                ref_index    <= 0;
+                ref_count    <= 0;
+                ref_active   <= '0';
+                ref_complete <= '0';
+                ref_bits     <= (others => '0');
+
+            else
+                ref_valid    <= '0';
+                ref_complete <= '0';
+
+                if ref_rs_done = '1' and ref_active = '0'
+                   and ref_index = 0 and ref_count = 0 then
+                    ref_active <= '1';
+
+                elsif ref_active = '1'
+                      and ref_index < 2040 then
+                    ref_data  <= ref_mixed(2039 - ref_index);
+                    ref_valid <= '1';
+                    ref_index <= ref_index + 1;
+                end if;
+
+                if ref_valid_out = '1' and ref_count < 2040 then
+                    ref_bits(4079 - 2*ref_count downto
+                             4078 - 2*ref_count) <= ref_code;
+
+                    ref_count <= ref_count + 1;
+
+                    if ref_count = 2039 then
+                        ref_active   <= '0';
+                        ref_complete <= '1';
+                    end if;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- Test stimulus
+    stimulus : process
+    begin
+        report "Starting transmitter reference comparison"
+            severity note;
+
+        for i in 0 to 238 loop
+            data_in(1911 - 8*i downto 1904 - 8*i) <=
+                std_logic_vector(to_unsigned((i*7 + 3) mod 256, 8));
+        end loop;
+
+        wait for 1 ns;
+        wait until falling_edge(clk);
+        wait until falling_edge(clk);
+        reset <= '0';
+
+        wait until falling_edge(clk);
+        start <= '1';
+
+        wait until falling_edge(clk);
+        start <= '0';
+
+        -- Wait for both paths to finish.
+        -- Their completion pulses may occur simultaneously.
+        wait for 25 us;
+
+        report "DEBUG: reference count = " &
+               integer'image(ref_count)
+               severity note;
+
+        assert ref_count = 2040
+            report "FAIL: reference did not capture 2040 pairs"
+            severity failure;
+
+        assert busy = '0'
+            report "FAIL: transmitter still busy"
+            severity failure;
+
+        assert tx_bits /= (tx_bits'range => '0')
+            report "FAIL: transmitter output is all zero"
+            severity failure;
+
+        assert tx_bits = ref_bits
+            report "FAIL: transmitter output differs from reference"
+            severity failure;
+
+        report "PASS: transmitter output matches reference"
+            severity note;
+
+        wait;
+
+    end process;
+
+end architecture;
+
+--> tb_viterbi_frame.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_viterbi_frame is
+end entity tb_viterbi_frame;
+
+architecture sim of tb_viterbi_frame is
+
+    constant FRAME_BITS : positive := 2040;
+
+    signal clk          : std_logic := '0';
+    signal reset        : std_logic := '1';
+    signal start        : std_logic := '0';
+
+    signal data_in      : std_logic := '0';
+    signal encoder_valid: std_logic := '0';
+    signal code_out     : std_logic_vector(1 downto 0);
+    signal code_valid   : std_logic;
+
+    signal rx_bits      : std_logic_vector(2*FRAME_BITS-1 downto 0)
+                          := (others => '0');
+
+    signal decoded_bits : std_logic_vector(FRAME_BITS-1 downto 0);
+    signal busy         : std_logic;
+    signal done         : std_logic;
+
+    signal frame        : std_logic_vector(FRAME_BITS-1 downto 0)
+                          := (others => '0');
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    encoder_inst : entity work.cc_encoder_ref
+        port map (
+            clk       => clk,
+            reset     => reset,
+            data_in   => data_in,
+            valid_in  => encoder_valid,
+            code_out  => code_out,
+            valid_out => code_valid
+        );
+
+    decoder_inst : entity work.viterbi_frame_decoder
+        generic map (
+            FRAME_BITS => FRAME_BITS
+        )
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => start,
+            rx_bits      => rx_bits,
+            decoded_bits => decoded_bits,
+            busy         => busy,
+            done         => done
+        );
+
+    stimulus : process
+        variable encoded_count : integer := 0;
+    begin
+
+        report "TEST START" severity note;
+
+        reset <= '1';
+        encoder_valid <= '0';
+
+        wait for 30 ns;
+        wait until falling_edge(clk);
+        reset <= '0';
+
+        -- Generate deterministic frame
+        for i in 0 to FRAME_BITS-1 loop
+            if (i mod 7 = 0) or (i mod 11 = 0) then
+                frame(FRAME_BITS-1-i) <= '1';
+            else
+                frame(FRAME_BITS-1-i) <= '0';
+            end if;
+        end loop;
+
+        wait until falling_edge(clk);
+
+        -- Enable encoder for exactly FRAME_BITS input bits
+        encoded_count := 0;
+        encoder_valid <= '1';
+
+        for i in 0 to FRAME_BITS-1 loop
+
+            data_in <= frame(FRAME_BITS-1-i);
+
+            wait until rising_edge(clk);
+            wait for 1 ns;
+
+            if code_valid = '1' then
+                rx_bits(
+                    2*FRAME_BITS-1-2*encoded_count downto
+                    2*FRAME_BITS-2-2*encoded_count
+                ) <= code_out;
+
+                encoded_count := encoded_count + 1;
+            end if;
+
+        end loop;
+
+        encoder_valid <= '0';
+        data_in <= '0';
+
+        assert encoded_count = FRAME_BITS
+            report "FAIL: incorrect encoded bit count"
+            severity failure;
+
+        report "Encoder completed; starting decoder"
+            severity note;
+
+        wait until falling_edge(clk);
+        start <= '1';
+
+        wait until falling_edge(clk);
+        start <= '0';
+
+        -- Prevent the test from hanging indefinitely
+        wait until done = '1' for 100 us;
+
+        if done /= '1' then
+            assert false
+                report "FAIL: Viterbi decoder timed out"
+                severity failure;
+        end if;
+
+        wait for 1 ns;
+
+        assert decoded_bits = frame
+            report "FAIL: decoded frame differs from input"
+            severity failure;
+
+        report "PASS: original frame recovered successfully"
+            severity note;
+
+        wait;
+    end process;
+
+end architecture sim;
+
+--> tb_full_rx_error.vhd
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_full_rx_error is
+end entity;
+
+architecture sim of tb_full_rx_error is
+
+    signal clk   : std_logic := '0';
+    signal reset : std_logic := '1';
+    signal start : std_logic := '0';
+
+    signal original_data : std_logic_vector(1911 downto 0)
+                           := (others => '0');
+
+    signal tx_bits : std_logic_vector(4079 downto 0);
+    signal tx_bits_with_error : std_logic_vector(4079 downto 0);
+    signal tx_busy : std_logic;
+    signal tx_done : std_logic;
+
+    signal rx_data : std_logic_vector(1911 downto 0);
+    signal rx_busy : std_logic;
+    signal rx_done : std_logic;
+    signal rx_error : std_logic;
+    signal rx_correction_valid : std_logic;
+    signal rx_start : std_logic := '0';
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    -- Inject exactly one channel-bit error into the completed transmit frame.
+    process(tx_bits)
+    variable error_mask : std_logic_vector(4079 downto 0);
+begin
+    error_mask := (others => '0');
+    error_mask(1000) := '1';
+    tx_bits_with_error <= tx_bits xor error_mask;
+end process;
+
+    tx_inst : entity work.tx_chain
+        port map (
+            clk     => clk,
+            reset   => reset,
+            start   => start,
+            data_in => original_data,
+            tx_bits => tx_bits,
+            busy    => tx_busy,
+            done    => tx_done
+        );
+
+    rx_inst : entity work.rx_chain
+        port map (
+            clk               => clk,
+            reset             => reset,
+            start             => rx_start,
+            rx_bits           => tx_bits_with_error,
+            data_out          => rx_data,
+            busy              => rx_busy,
+            done              => rx_done,
+            error_detect      => rx_error,
+            correction_valid  => rx_correction_valid
+        );
+
+    stimulus : process
+        variable data_temp : std_logic_vector(1911 downto 0);
+    begin
+
+        report "Starting full RS + CC receiver test with one channel-bit error"
+            severity note;
+
+        -- Generate deterministic 239-byte input
+        for i in 0 to 238 loop
+            data_temp(1911-8*i downto 1904-8*i) :=
+                std_logic_vector(to_unsigned((i*7+3) mod 256, 8));
+        end loop;
+
+        original_data <= data_temp;
+
+        wait until rising_edge(clk);
+        wait until rising_edge(clk);
+        reset <= '0';
+
+        -- Start transmitter
+        wait until rising_edge(clk);
+        start <= '1';
+
+        wait until rising_edge(clk);
+        start <= '0';
+
+        -- Wait for transmitter completion, with timeout
+        for i in 0 to 5000 loop
+            wait until rising_edge(clk);
+            exit when tx_done = '1';
+        end loop;
+
+        assert tx_done = '1'
+            report "FAIL: transmitter did not complete"
+            severity failure;
+
+        report "Transmitter completed"
+            severity note;
+
+        -- Start receiver after complete frame is available
+        wait until rising_edge(clk);
+        rx_start <= '1';
+
+        wait until rising_edge(clk);
+        rx_start <= '0';
+
+        -- Wait for receiver completion, with timeout
+        for i in 0 to 10000 loop
+            wait until rising_edge(clk);
+            exit when rx_done = '1';
+        end loop;
+
+        assert rx_done = '1'
+            report "FAIL: receiver did not complete"
+            severity failure;
+
+        wait for 1 ns;
+
+        -- Verify the original data is recovered after channel-bit error.
+        assert rx_data = original_data
+            report "FAIL: recovered data does not match original data after channel-bit error"
+            severity failure;
+
+        assert rx_correction_valid = '1'
+            report "FAIL: receiver did not report valid RS correction"
+            severity failure;
+
+        report "PASS: complete RS + CC chain recovered original data with one channel-bit error"
+            severity note;
+
+        wait;
+    end process;
+
+end architecture sim;
+
+--> tb_interleaver.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+
+entity tb_interleaver is
+end entity;
+
+architecture sim of tb_interleaver is
+    signal original_data : std_logic_vector(2039 downto 0);
+    signal interleaved_data : std_logic_vector(2039 downto 0);
+    signal recovered_data : std_logic_vector(2039 downto 0);
+begin
+
+    enc_inst : entity work.interleaver
+        port map (
+            data_in  => original_data,
+            data_out => interleaved_data
+        );
+
+    dec_inst : entity work.deinterleaver
+        port map (
+            data_in  => interleaved_data,
+            data_out => recovered_data
+        );
+
+    process
+    begin
+        original_data <= (others => '0');
+        wait for 10 ns;
+
+        assert recovered_data = original_data
+            report "FAIL: all-zero round trip"
+            severity failure;
+
+        original_data <= (others => '1');
+        wait for 10 ns;
+
+        assert recovered_data = original_data
+            report "FAIL: all-one round trip"
+            severity failure;
+
+        original_data <= (others => '0');
+        original_data(2039) <= '1';
+        original_data(1000) <= '1';
+        original_data(0) <= '1';
+        wait for 10 ns;
+
+        assert recovered_data = original_data
+            report "FAIL: bit-pattern round trip"
+            severity failure;
+
+        report "PASS: interleaver/deinterleaver round trip" severity note;
+        
+        wait;
+    end process;
+
+end architecture;
+
+--> tb_rs_decoder.vhd
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_rs_decoder is
+end entity;
+
+architecture sim of tb_rs_decoder is
+    signal clk : std_logic := '0';
+    signal reset : std_logic := '1';
+
+    signal tx_start, tx_busy, tx_done : std_logic := '0';
+    signal rx_start, rx_busy, rx_done : std_logic := '0';
+
+    signal data_in : std_logic_vector(1911 downto 0)
+        := (others => '0');
+
+    signal tx_codeword : std_logic_vector(2039 downto 0);
+    signal rx_codeword : std_logic_vector(2039 downto 0);
+
+    signal error_detect : std_logic;
+    signal correction_valid : std_logic;
+
+begin
+    clk <= not clk after 5 ns;
+
+    encoder_inst : entity work.rs_reference_encoder
+        port map (
+            clk => clk,
+            reset => reset,
+            start => tx_start,
+            data_in => data_in,
+            codeword_out => tx_codeword,
+            busy => tx_busy,
+            done => tx_done
+        );
+
+    decoder_inst : entity work.rs_decoder
+        port map (
+            clk => clk,
+            reset => reset,
+            start => rx_start,
+            codeword_in => tx_codeword,
+            codeword_out => rx_codeword,
+            busy => rx_busy,
+            done => rx_done,
+            error_detect => error_detect,
+            correction_valid => correction_valid
+        );
+
+    process
+        variable completed : boolean;
+    begin
+        report "Starting RS clean-codeword test" severity note;
+
+        reset <= '1';
+        wait for 20 ns;
+        wait until falling_edge(clk);
+        reset <= '0';
+
+        -- Prepare deterministic input data
+        for i in 0 to 238 loop
+            data_in(1911-8*i downto 1904-8*i) <=
+                std_logic_vector(to_unsigned((i*7+3) mod 256, 8));
+        end loop;
+
+        -- Start encoder
+        wait until falling_edge(clk);
+        tx_start <= '1';
+
+        wait until rising_edge(clk);
+        wait for 1 ns;
+
+        assert tx_done = '1'
+            report "FAIL: encoder did not complete"
+            severity failure;
+
+        wait until falling_edge(clk);
+        tx_start <= '0';
+
+        report "Encoder completed" severity note;
+
+        -- Start decoder
+        wait until falling_edge(clk);
+        rx_start <= '1';
+
+        wait until rising_edge(clk);
+        wait for 1 ns;
+
+        assert rx_busy = '1'
+            report "FAIL: decoder did not start"
+            severity failure;
+
+        wait until falling_edge(clk);
+        rx_start <= '0';
+
+        -- Decoder calculates 16 syndromes before checking
+        completed := false;
+        for i in 0 to 25 loop
+            wait until rising_edge(clk);
+            wait for 1 ns;
+            if rx_done = '1' then
+                completed := true;
+                exit;
+            end if;
+        end loop;
+
+        assert completed
+            report "FAIL: decoder timeout"
+            severity failure;
+
+        assert correction_valid = '1'
+            report "FAIL: clean codeword was not accepted"
+            severity failure;
+
+        assert error_detect = '0'
+            report "FAIL: clean codeword reported an error"
+            severity failure;
+
+        assert rx_codeword = tx_codeword
+            report "FAIL: decoded codeword differs from encoded codeword"
+            severity failure;
+
+        report "PASS: RS clean-codeword test" severity note;
+        wait;
+    end process;
+end architecture;
+
+--> tb_rs_error_correction.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.all;
+
+entity tb_rs_error_correction is
+end entity;
+
+architecture sim of tb_rs_error_correction is
+
+    signal clk   : std_logic := '0';
+    signal reset : std_logic := '1';
+
+    signal tx_start : std_logic := '0';
+    signal tx_busy  : std_logic;
+    signal tx_done  : std_logic;
+
+    signal rx_start : std_logic := '0';
+    signal rx_busy  : std_logic;
+    signal rx_done  : std_logic;
+
+    signal data_in : std_logic_vector(1911 downto 0)
+        := (others => '0');
+
+    signal tx_codeword : std_logic_vector(2039 downto 0);
+
+    signal rx_input_codeword : std_logic_vector(2039 downto 0)
+        := (others => '0');
+
+    signal rx_codeword : std_logic_vector(2039 downto 0);
+
+    signal error_detect     : std_logic;
+    signal correction_valid : std_logic;
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    -- RS(255,239) reference encoder
+    encoder_inst : entity work.rs_reference_encoder
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => tx_start,
+            data_in      => data_in,
+            codeword_out => tx_codeword,
+            busy         => tx_busy,
+            done         => tx_done
+        );
+
+    -- RS(255,239) decoder under test
+    decoder_inst : entity work.rs_decoder
+        port map (
+            clk              => clk,
+            reset            => reset,
+            start            => rx_start,
+            codeword_in      => rx_input_codeword,
+            codeword_out     => rx_codeword,
+            busy             => rx_busy,
+            done             => rx_done,
+            error_detect     => error_detect,
+            correction_valid => correction_valid
+        );
+
+    stimulus : process
+        variable original_word  : std_logic_vector(2039 downto 0);
+        variable corrupted_word : std_logic_vector(2039 downto 0);
+        variable completed      : boolean;
+    begin
+
+        report "Starting RS single-symbol correction test"
+            severity note;
+
+        -- Reset
+        reset <= '1';
+        wait for 20 ns;
+        wait until falling_edge(clk);
+        reset <= '0';
+
+        -- Generate deterministic input data
+        for i in 0 to 238 loop
+            data_in(1911-8*i downto 1904-8*i) <=
+                std_logic_vector(
+                    to_unsigned((i*7+3) mod 256, 8)
+                );
+        end loop;
+
+        -- Start RS encoder
+        wait until falling_edge(clk);
+        tx_start <= '1';
+
+        wait until rising_edge(clk);
+        wait for 1 ns;
+
+        assert tx_done = '1'
+            report "FAIL: RS encoder did not complete"
+            severity failure;
+
+        original_word := tx_codeword;
+
+        report "RS codeword generated successfully"
+            severity note;
+
+        wait until falling_edge(clk);
+        tx_start <= '0';
+
+        -- Inject one bit error in first RS symbol
+        corrupted_word := original_word;
+        corrupted_word(2039) := not original_word(2039);
+
+        rx_input_codeword <= corrupted_word;
+
+        assert corrupted_word /= original_word
+            report "FAIL: error injection unsuccessful"
+            severity failure;
+
+        report "One bit error injected into first RS symbol"
+            severity note;
+
+        -- Start RS decoder
+        wait until falling_edge(clk);
+        rx_start <= '1';
+
+        wait until rising_edge(clk);
+        wait for 1 ns;
+
+        assert rx_busy = '1'
+            report "FAIL: RS decoder did not start"
+            severity failure;
+
+        wait until falling_edge(clk);
+        rx_start <= '0';
+
+        -- Wait for RS decoder completion
+        completed := false;
+
+        for i in 0 to 25 loop
+            wait until rising_edge(clk);
+            wait for 1 ns;
+
+            if rx_done = '1' then
+                completed := true;
+                exit;
+            end if;
+        end loop;
+
+        assert completed
+            report "FAIL: RS decoder timed out"
+            severity failure;
+
+        -- Verify error detection
+        assert error_detect = '1'
+            report "FAIL: RS error not detected"
+            severity failure;
+
+        -- Verify correction
+        assert correction_valid = '1'
+            report "FAIL: RS correction unsuccessful"
+            severity failure;
+
+        -- Compare corrected and original codewords
+        assert rx_codeword = original_word
+            report "FAIL: corrected RS codeword differs from original"
+            severity failure;
+
+        report "PASS: RS detected and corrected single-symbol error"
+            severity note;
+
+        std.env.stop;
+        wait;
+
+    end process;
+
+end architecture sim;
+
+--> tb_rs_8_errors.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_rs_8_errors is
+end entity;
+
+architecture sim of tb_rs_8_errors is
+    signal clk : std_logic := '0';
+    signal reset : std_logic := '1';
+
+    signal tx_start, tx_busy, tx_done : std_logic := '0';
+    signal rx_start, rx_busy, rx_done : std_logic := '0';
+
+    signal data_in : std_logic_vector(1911 downto 0)
+        := (others => '0');
+
+    signal tx_codeword : std_logic_vector(2039 downto 0);
+    signal rx_input_codeword : std_logic_vector(2039 downto 0)
+        := (others => '0');
+    signal rx_codeword : std_logic_vector(2039 downto 0);
+
+    signal error_detect : std_logic;
+    signal correction_valid : std_logic;
+
+begin
+    clk <= not clk after 5 ns;
+
+    encoder_inst : entity work.rs_reference_encoder
+        port map (
+            clk => clk,
+            reset => reset,
+            start => tx_start,
+            data_in => data_in,
+            codeword_out => tx_codeword,
+            busy => tx_busy,
+            done => tx_done
+        );
+
+    decoder_inst : entity work.rs_decoder
+        port map (
+            clk => clk,
+            reset => reset,
+            start => rx_start,
+            codeword_in => rx_input_codeword,
+            codeword_out => rx_codeword,
+            busy => rx_busy,
+            done => rx_done,
+            error_detect => error_detect,
+            correction_valid => correction_valid
+        );
+
+    process
+        variable original_word : std_logic_vector(2039 downto 0);
+        variable corrupted_word : std_logic_vector(2039 downto 0);
+        variable completed : boolean;
+    begin
+        report "Starting RS 8-symbol error-correction test"
+            severity note;
+
+        -- Reset
+        reset <= '1';
+        wait for 20 ns;
+        wait until falling_edge(clk);
+        reset <= '0';
+
+        -- Generate deterministic input data
+        for i in 0 to 238 loop
+            data_in(1911-8*i downto 1904-8*i) <=
+                std_logic_vector(to_unsigned((i*7+3) mod 256, 8));
+        end loop;
+
+        -- Generate valid codeword
+        wait until falling_edge(clk);
+        tx_start <= '1';
+
+        wait until rising_edge(clk);
+        wait for 1 ns;
+
+        assert tx_done = '1'
+            report "FAIL: encoder did not complete"
+            severity failure;
+
+        original_word := tx_codeword;
+
+        wait until falling_edge(clk);
+        tx_start <= '0';
+
+        -- Corrupt one bit in each of eight distinct symbols
+        corrupted_word := original_word;
+
+        for i in 0 to 7 loop
+            corrupted_word(2039 - 8*i) :=
+                not original_word(2039 - 8*i);
+        end loop;
+
+        rx_input_codeword <= corrupted_word;
+
+        report "Eight distinct symbols corrupted"
+            severity note;
+
+        -- Start decoder
+        wait until falling_edge(clk);
+        rx_start <= '1';
+
+        wait until rising_edge(clk);
+        wait for 1 ns;
+
+        assert rx_busy = '1'
+            report "FAIL: decoder did not start"
+            severity failure;
+
+        wait until falling_edge(clk);
+        rx_start <= '0';
+
+        -- Wait for decoder completion
+        completed := false;
+
+        for i in 0 to 25 loop
+            wait until rising_edge(clk);
+            wait for 1 ns;
+
+            if rx_done = '1' then
+                completed := true;
+                exit;
+            end if;
+        end loop;
+
+        assert completed
+            report "FAIL: decoder timeout"
+            severity failure;
+
+        assert error_detect = '1'
+            report "FAIL: errors were not detected"
+            severity failure;
+
+        assert correction_valid = '1'
+            report "FAIL: decoder could not correct eight errors"
+            severity failure;
+
+        assert rx_codeword = original_word
+            report "FAIL: corrected codeword differs from original"
+            severity failure;
+
+        report "PASS: RS corrected eight symbol errors"
+            severity note;
+
+        wait;
+    end process;
+end architecture;
+
+--> tb_deinterleaver.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_deinterleaver is
+end entity;
+
+architecture sim of tb_deinterleaver is
+    signal data_in  : std_logic_vector(16319 downto 0)
+                     := (others => '0');
+    signal data_out : std_logic_vector(16319 downto 0);
+begin
+    dut : entity work.deinterleaver
+        port map (
+            data_in  => data_in,
+            data_out => data_out
+        );
+
+    process
+        variable original : std_logic_vector(16319 downto 0);
+        variable interleaved : std_logic_vector(16319 downto 0);
+    begin
+        -- Create eight distinguishable codewords.
+        for c in 0 to 7 loop
+            for r in 0 to 254 loop
+                for b in 0 to 7 loop
+                    original(16319 - (c*2040 + r*8 + b)) :=
+                        std_logic'val(2 + ((c + r + b) mod 2));
+                end loop;
+            end loop;
+        end loop;
+
+        -- Interleave symbols round-robin.
+        for r in 0 to 254 loop
+            for c in 0 to 7 loop
+                for b in 0 to 7 loop
+                    interleaved(16319 - ((r*8 + c)*8 + b)) :=
+                        original(16319 - (c*2040 + r*8 + b));
+                end loop;
+            end loop;
+        end loop;
+
+        data_in <= interleaved;
+        wait for 10 ns;
+
+        assert data_out = original
+            report "FAIL: deinterleaving mismatch"
+            severity failure;
+
+        report "PASS: depth-8 deinterleaving round trip"
+            severity note;
+
+        wait;
+    end process;
+end architecture;
+
+--> tb_rs8_encoder.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_rs8_encoder is
+end entity;
+
+architecture sim of tb_rs8_encoder is
+    signal clk   : std_logic := '0';
+    signal reset : std_logic := '1';
+    signal start : std_logic := '0';
+
+    signal data_in : std_logic_vector(1911 downto 0)
+                     := (others => '0');
+    signal codeword_out : std_logic_vector(2039 downto 0);
+    signal busy : std_logic;
+    signal done : std_logic;
+
+    type frame_array is array (0 to 7) of
+        std_logic_vector(2039 downto 0);
+    signal frame : frame_array;
+
+begin
+    clk <= not clk after 5 ns;
+
+    dut : entity work.rs_reference_encoder
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => start,
+            data_in      => data_in,
+            codeword_out => codeword_out,
+            busy         => busy,
+            done         => done
+        );
+
+    stimulus : process
+        variable d : std_logic_vector(1911 downto 0);
+    begin
+        wait for 20 ns;
+        wait until rising_edge(clk);
+        reset <= '0';
+
+        for n in 0 to 7 loop
+            for i in 0 to 238 loop
+                d(1911-8*i downto 1904-8*i) :=
+                    std_logic_vector(to_unsigned((n*31+i*7+3) mod 256, 8));
+            end loop;
+
+            data_in <= d;
+            wait until rising_edge(clk);
+            start <= '1';
+            wait until rising_edge(clk);
+            start <= '0';
+
+            wait until done = '1';
+            frame(n) <= codeword_out;
+            wait until rising_edge(clk);
+        end loop;
+
+        report "PASS: generated eight RS codewords"
+            severity note;
+        wait;
+    end process;
+end architecture;
+
+-->tb_i8_interleave.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_i8_interleave is
+end entity;
+
+architecture sim of tb_i8_interleave is
+
+    signal interleaved   : std_logic_vector(16319 downto 0)
+                           := (others => '0');
+    signal deinterleaved : std_logic_vector(16319 downto 0);
+
+begin
+
+    dut : entity work.deinterleaver_i8
+        port map (
+            data_in  => interleaved,
+            data_out => deinterleaved
+        );
+
+    process
+        variable original : std_logic_vector(16319 downto 0);
+        variable mixed    : std_logic_vector(16319 downto 0);
+    begin
+
+        -- Generate eight distinguishable RS codewords
+        for c in 0 to 7 loop
+            for r in 0 to 254 loop
+                original(16319 - (c*2040 + r*8) downto
+                         16312 - (c*2040 + r*8)) :=
+                    std_logic_vector(
+                        to_unsigned((c*31+r) mod 256, 8)
+                    );
+            end loop;
+        end loop;
+
+        -- Interleave 8-bit symbols round-robin
+        for r in 0 to 254 loop
+            for c in 0 to 7 loop
+                mixed(16319 - ((r*8+c)*8) downto
+                      16312 - ((r*8+c)*8)) :=
+                    original(16319 - (c*2040 + r*8) downto
+                             16312 - (c*2040 + r*8));
+            end loop;
+        end loop;
+
+        interleaved <= mixed;
+        wait for 10 ns;
+
+        assert deinterleaved = original
+            report "FAIL: depth-8 symbol ordering mismatch"
+            severity failure;
+
+        report "PASS: depth-8 symbol interleaving round trip"
+            severity note;
+
+        wait;
+    end process;
+
+end architecture;
+
+
+--> tb_tx_chain_i8.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity tb_tx_chain_i8 is
+end entity tb_tx_chain_i8;
+
+architecture sim of tb_tx_chain_i8 is
+
+    signal clk : std_logic := '0';
+    signal reset : std_logic := '1';
+    signal start : std_logic := '0';
+
+    signal data_in : std_logic_vector(15295 downto 0)
+        := (others => '0');
+
+    signal tx_bits : std_logic_vector(32639 downto 0);
+    signal busy : std_logic;
+    signal done : std_logic;
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    dut : entity work.tx_chain_i8
+        port map (
+            clk     => clk,
+            reset   => reset,
+            start   => start,
+            data_in => data_in,
+            tx_bits => tx_bits,
+            busy    => busy,
+            done    => done
+        );
+
+    stimulus : process
+    begin
+        report "TEST START" severity note;
+
+        -- Apply reset
+        wait for 20 ns;
+        wait until rising_edge(clk);
+        reset <= '0';
+
+        -- Apply start pulse
+        wait until rising_edge(clk);
+        start <= '1';
+
+        wait until rising_edge(clk);
+        start <= '0';
+
+        -- Allow the transmitter time to operate
+        wait for 100 us;
+
+        -- Check status at a fixed time
+        if done = '1' then
+            report "TRANSMITTER DONE" severity note;
+        else
+            report "TRANSMITTER NOT DONE YET" severity note;
+        end if;
+
+        report "TEST FINISHED" severity note;
+        wait;
+    end process;
+
+end architecture sim;
+
+--> tb_tx_i8_elab.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity tb_tx_i8_elab is
+end entity;
+
+architecture sim of tb_tx_i8_elab is
+    signal clk     : std_logic := '0';
+    signal reset   : std_logic := '1';
+    signal start   : std_logic := '0';
+    signal data_in : std_logic_vector(15295 downto 0)
+                     := (others => '0');
+    signal tx_bits : std_logic_vector(32639 downto 0);
+    signal busy    : std_logic;
+    signal done    : std_logic;
+begin
+
+    dut : entity work.tx_chain_i8
+        port map (
+            clk     => clk,
+            reset   => reset,
+            start   => start,
+            data_in => data_in,
+            tx_bits => tx_bits,
+            busy    => busy,
+            done    => done
+        );
+
+end architecture;
+
+--> tb_full_i8.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.all;
+
+entity tb_full_i8 is
+end entity tb_full_i8;
+
+architecture sim of tb_full_i8 is
+
+    signal clk   : std_logic := '0';
+    signal reset : std_logic := '1';
+    signal start : std_logic := '0';
+
+    signal original_data : std_logic_vector(15295 downto 0)
+        := (others => '0');
+
+    signal tx_bits : std_logic_vector(32639 downto 0);
+    signal tx_busy : std_logic;
+    signal tx_done : std_logic;
+
+    -- Channel buffer for injecting a transmission error
+    signal channel_bits : std_logic_vector(32639 downto 0)
+        := (others => '0');
+
+    signal rx_start : std_logic := '0';
+
+    signal rx_data : std_logic_vector(15295 downto 0);
+    signal rx_busy : std_logic;
+    signal rx_done : std_logic;
+    signal rx_error : std_logic;
+    signal rx_correction_valid : std_logic;
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    -- Depth-8 transmitter
+    tx_inst : entity work.tx_chain_i8
+        port map (
+            clk     => clk,
+            reset   => reset,
+            start   => start,
+            data_in => original_data,
+            tx_bits => tx_bits,
+            busy    => tx_busy,
+            done    => tx_done
+        );
+
+    -- Depth-8 receiver
+    rx_inst : entity work.rx_chain_i8
+        port map (
+            clk              => clk,
+            reset            => reset,
+            start            => rx_start,
+            rx_bits          => channel_bits,
+            data_out         => rx_data,
+            busy             => rx_busy,
+            done             => rx_done,
+            error_detect     => rx_error,
+            correction_valid => rx_correction_valid
+        );
+
+    stimulus : process
+        variable data_temp : std_logic_vector(15295 downto 0);
+    begin
+
+        report "Starting depth-8 RS + CC single-bit error test"
+            severity note;
+
+        -- Generate deterministic input: eight RS data blocks
+        for i in 0 to 1911 loop
+            data_temp(15295 - 8*i downto 15288 - 8*i) :=
+                std_logic_vector(to_unsigned((i*7 + 3) mod 256, 8));
+        end loop;
+
+        original_data <= data_temp;
+
+        -- Reset sequence
+        wait for 30 ns;
+        wait until rising_edge(clk);
+        reset <= '0';
+
+        -- Start transmitter
+        wait until rising_edge(clk);
+        start <= '1';
+
+        wait until rising_edge(clk);
+        start <= '0';
+
+        -- Wait for transmitter completion
+        wait until tx_done = '1' for 1 ms;
+
+        if tx_done /= '1' then
+            assert false
+                report "FAIL: depth-8 transmitter timed out"
+                severity failure;
+            std.env.stop;
+            wait;
+        end if;
+
+        report "Depth-8 transmitter completed"
+            severity note;
+
+        -- Copy completed encoded stream into the channel buffer
+        channel_bits <= tx_bits;
+        wait for 1 ns;
+
+        -- Flip exactly one transmitted bit
+        channel_bits(100) <= not channel_bits(100);
+
+        report "Single-bit channel error injected"
+            severity note;
+
+        -- Start receiver after the corrupted stream is ready
+        wait until rising_edge(clk);
+        rx_start <= '1';
+
+        wait until rising_edge(clk);
+        rx_start <= '0';
+
+        -- Wait for receiver completion
+        wait until rx_done = '1' for 2 ms;
+
+        if rx_done /= '1' then
+            assert false
+                report "FAIL: depth-8 receiver timed out"
+                severity failure;
+            std.env.stop;
+            wait;
+        end if;
+
+        wait for 1 ns;
+
+        -- Compare recovered data with original input
+        assert rx_data = original_data
+            report "FAIL: recovered data differs after single-bit error"
+            severity failure;
+
+        report "PASS: depth-8 receiver recovered original data after single-bit error"
+            severity note;
+
+        std.env.stop;
+        wait;
+
+    end process;
+
+end architecture sim;
+
+
+--> tb_rx_i8_elab.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity tb_rx_i8_elab is
+end entity;
+
+architecture sim of tb_rx_i8_elab is
+    signal clk : std_logic := '0';
+    signal reset : std_logic := '1';
+    signal start : std_logic := '0';
+
+    signal rx_bits : std_logic_vector(32639 downto 0)
+        := (others => '0');
+    signal data_out : std_logic_vector(15295 downto 0);
+    signal busy : std_logic;
+    signal done : std_logic;
+    signal error_detect : std_logic;
+    signal correction_valid : std_logic;
+begin
+    clk <= not clk after 5 ns;
+
+    dut : entity work.rx_chain_i8
+        port map (
+            clk              => clk,
+            reset            => reset,
+            start            => start,
+            rx_bits          => rx_bits,
+            data_out         => data_out,
+            busy             => busy,
+            done             => done,
+            error_detect     => error_detect,
+            correction_valid => correction_valid
+        );
+end architecture;
+
+--> tb_one_rs_elab.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity tb_one_rs_elab is
+end entity;
+
+architecture sim of tb_one_rs_elab is
+    signal clk              : std_logic := '0';
+    signal reset            : std_logic := '1';
+    signal start            : std_logic := '0';
+    signal codeword_in      : std_logic_vector(2039 downto 0)
+                             := (others => '0');
+    signal codeword_out     : std_logic_vector(2039 downto 0);
+    signal busy             : std_logic;
+    signal done             : std_logic;
+    signal error_detect     : std_logic;
+    signal correction_valid : std_logic;
+begin
+
+    clk <= not clk after 5 ns;
+
+    uut : entity work.rs_decoder
+        port map (
+            clk              => clk,
+            reset            => reset,
+            start            => start,
+            codeword_in      => codeword_in,
+            codeword_out     => codeword_out,
+            busy             => busy,
+            done             => done,
+            error_detect     => error_detect,
+            correction_valid => correction_valid
+        );
+
+    process
+    begin
+        wait for 20 ns;
+        report "ONE RS DECODER ELABORATION TEST STARTED";
+        wait;
+    end process;
+
+end architecture;
+
+
+--> tb_eight_rs_elab.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity tb_eight_rs_elab is
+end entity;
+
+architecture sim of tb_eight_rs_elab is
+    signal clk   : std_logic := '0';
+    signal reset : std_logic := '1';
+    signal start : std_logic := '0';
+
+    type codeword_array is array (0 to 7) of
+        std_logic_vector(2039 downto 0);
+
+    signal codeword_in  : codeword_array := (others => (others => '0'));
+    signal codeword_out : codeword_array;
+    signal busy         : std_logic_vector(7 downto 0);
+    signal done         : std_logic_vector(7 downto 0);
+    signal error_detect : std_logic_vector(7 downto 0);
+    signal correction_valid : std_logic_vector(7 downto 0);
+begin
+    clk <= not clk after 5 ns;
+
+    gen_rs : for i in 0 to 7 generate
+        uut : entity work.rs_decoder
+            port map (
+                clk              => clk,
+                reset            => reset,
+                start            => start,
+                codeword_in      => codeword_in(i),
+                codeword_out     => codeword_out(i),
+                busy             => busy(i),
+                done             => done(i),
+                error_detect     => error_detect(i),
+                correction_valid => correction_valid(i)
+            );
+    end generate;
+
+    process
+    begin
+        wait for 20 ns;
+        report "EIGHT RS DECODERS ELABORATION TEST STARTED";
+        wait;
+    end process;
+end architecture;
+
+--> tb_viterbi_eight_rs_elab.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity tb_viterbi_eight_rs_elab is
+end entity;
+
+architecture sim of tb_viterbi_eight_rs_elab is
+
+    signal clk   : std_logic := '0';
+    signal reset : std_logic := '1';
+    signal start : std_logic := '0';
+
+    signal rx_bits : std_logic_vector(32639 downto 0)
+                   := (others => '0');
+
+    signal decoded_bits : std_logic_vector(16319 downto 0);
+    signal vit_done     : std_logic;
+    signal vit_busy     : std_logic;
+
+    type codeword_array is array (0 to 7) of
+        std_logic_vector(2039 downto 0);
+
+    signal codeword_in  : codeword_array
+                        := (others => (others => '0'));
+    signal codeword_out : codeword_array;
+
+    signal rs_busy : std_logic_vector(7 downto 0);
+    signal rs_done : std_logic_vector(7 downto 0);
+    signal rs_error : std_logic_vector(7 downto 0);
+    signal rs_valid : std_logic_vector(7 downto 0);
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    vit_inst : entity work.viterbi_frame_decoder
+        generic map (
+            FRAME_BITS => 16320
+        )
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => start,
+            rx_bits      => rx_bits,
+            decoded_bits => decoded_bits,
+            busy         => vit_busy,
+            done         => vit_done
+        );
+
+    gen_rs : for i in 0 to 7 generate
+        rs_inst : entity work.rs_decoder
+            port map (
+                clk              => clk,
+                reset            => reset,
+                start            => start,
+                codeword_in      => codeword_in(i),
+                codeword_out     => codeword_out(i),
+                busy             => rs_busy(i),
+                done             => rs_done(i),
+                error_detect     => rs_error(i),
+                correction_valid => rs_valid(i)
+            );
+    end generate;
+
+    process
+    begin
+        wait for 20 ns;
+        report "VITERBI PLUS EIGHT RS ELABORATION TEST STARTED";
+        wait;
+    end process;
+
+end architecture;
+
+--> tb_viterbi_eight_rs_deint_elab.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity tb_viterbi_eight_rs_deint_elab is
+end entity;
+
+architecture sim of tb_viterbi_eight_rs_deint_elab is
+
+    signal clk   : std_logic := '0';
+    signal reset : std_logic := '1';
+    signal start : std_logic := '0';
+
+    signal rx_bits : std_logic_vector(32639 downto 0)
+                   := (others => '0');
+
+    signal decoded_bits : std_logic_vector(16319 downto 0);
+    signal deinterleaved_bits : std_logic_vector(16319 downto 0);
+
+    signal vit_done : std_logic;
+    signal vit_busy : std_logic;
+
+    type codeword_array is array (0 to 7) of
+        std_logic_vector(2039 downto 0);
+
+    signal codeword_in  : codeword_array
+                        := (others => (others => '0'));
+    signal codeword_out : codeword_array;
+
+    signal rs_busy  : std_logic_vector(7 downto 0);
+    signal rs_done  : std_logic_vector(7 downto 0);
+    signal rs_error : std_logic_vector(7 downto 0);
+    signal rs_valid : std_logic_vector(7 downto 0);
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    vit_inst : entity work.viterbi_frame_decoder
+        generic map (
+            FRAME_BITS => 16320
+        )
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => start,
+            rx_bits      => rx_bits,
+            decoded_bits => decoded_bits,
+            busy         => vit_busy,
+            done         => vit_done
+        );
+
+    deint_inst : entity work.deinterleaver_i8
+        port map (
+            data_in  => decoded_bits,
+            data_out => deinterleaved_bits
+        );
+
+    gen_rs : for i in 0 to 7 generate
+        rs_inst : entity work.rs_decoder
+            port map (
+                clk              => clk,
+                reset            => reset,
+                start            => start,
+                codeword_in      => codeword_in(i),
+                codeword_out     => codeword_out(i),
+                busy             => rs_busy(i),
+                done             => rs_done(i),
+                error_detect     => rs_error(i),
+                correction_valid => rs_valid(i)
+            );
+    end generate;
+
+    process
+    begin
+        wait for 20 ns;
+        report "VITERBI + DEINTERLEAVER + EIGHT RS ELABORATION TEST STARTED";
+        wait;
+    end process;
+
+end architecture;
+

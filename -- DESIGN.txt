@@ -1,0 +1,1774 @@
+--> DESIGN.VHD
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity cc_encoder_ref is
+    port (
+        clk       : in  std_logic;
+        reset     : in  std_logic;
+        data_in   : in  std_logic;
+        valid_in  : in  std_logic;
+        code_out  : out std_logic_vector(1 downto 0);
+        valid_out : out std_logic
+    );
+end entity cc_encoder_ref;
+
+architecture behavioral of cc_encoder_ref is
+    signal shift_reg : std_logic_vector(6 downto 0)
+                       := (others => '0');
+begin
+
+    process(clk)
+        variable reg_next : std_logic_vector(6 downto 0);
+        variable c1       : std_logic;
+        variable c2       : std_logic;
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                shift_reg <= (others => '0');
+                code_out  <= (others => '0');
+                valid_out <= '0';
+
+            else
+                valid_out <= '0';
+
+                if valid_in = '1' then
+                    reg_next := data_in & shift_reg(6 downto 1);
+
+                    c1 := reg_next(6) xor reg_next(5) xor
+                          reg_next(4) xor reg_next(3) xor
+                          reg_next(0);
+
+                    c2 := not (
+                          reg_next(6) xor reg_next(4) xor
+                          reg_next(3) xor reg_next(1) xor
+                          reg_next(0)
+                          );
+
+                    shift_reg <= reg_next;
+                    code_out  <= c1 & c2;
+                    valid_out <= '1';
+                end if;
+            end if;
+        end if;
+    end process;
+
+end architecture behavioral;
+
+--> viterbi_decoder.VHD
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity viterbi_decoder is
+    generic (
+        DATA_BITS : positive := 14
+    );
+    port (
+        rx_bits : in std_logic_vector(2*(DATA_BITS+6)-1 downto 0);
+        decoded_bits : out std_logic_vector(DATA_BITS-1 downto 0)
+    );
+end entity viterbi_decoder;
+
+architecture rtl of viterbi_decoder is
+
+    constant STEPS : positive := DATA_BITS + 6;
+    constant INF : integer := 1000000;
+
+    type metric_array is array (0 to 63) of integer range 0 to INF;
+
+    type survivor_array is array (
+        natural range <>, natural range <>
+    ) of integer range 0 to 1;
+
+begin
+
+    process(rx_bits)
+
+        variable metric      : metric_array;
+        variable next_metric : metric_array;
+        variable survivor    : survivor_array(1 to STEPS, 0 to 63);
+
+        variable state_bits  : std_logic_vector(5 downto 0);
+        variable reg7        : std_logic_vector(6 downto 0);
+
+        variable c1, c2      : std_logic;
+        variable expected    : std_logic_vector(1 downto 0);
+        variable received    : std_logic_vector(1 downto 0);
+
+        variable branch      : integer range 0 to 2;
+        variable candidate   : integer range 0 to INF;
+        variable next_state  : integer range 0 to 63;
+        variable best_state  : integer range 0 to 63;
+        variable prev_state  : integer range 0 to 63;
+
+        variable result_bits : std_logic_vector(STEPS-1 downto 0);
+
+    begin
+
+        -- Initialize path metrics
+        for s in 0 to 63 loop
+            metric(s) := INF;
+        end loop;
+
+        metric(0) := 0;
+
+        -- Forward path-metric calculation
+        for t in 0 to STEPS-1 loop
+
+            for s in 0 to 63 loop
+                next_metric(s) := INF;
+            end loop;
+
+            received := rx_bits(2*STEPS-1-2*t downto
+                                2*STEPS-2-2*t);
+
+            for s in 0 to 63 loop
+
+                if metric(s) < INF then
+
+                    state_bits := std_logic_vector(to_unsigned(s, 6));
+
+                    for b in 0 to 1 loop
+
+                        if b = 0 then
+                            reg7 := '0' & state_bits;
+                        else
+                            reg7 := '1' & state_bits;
+                        end if;
+
+                        -- Generator equations matching cc_encoder_ref
+                        c1 := reg7(6) xor reg7(5) xor
+                              reg7(4) xor reg7(3) xor reg7(0);
+
+                        c2 := not (
+                              reg7(6) xor reg7(4) xor
+                              reg7(3) xor reg7(1) xor reg7(0)
+                        );
+
+                        expected := c1 & c2;
+
+                        -- Hamming distance
+                        branch := 0;
+
+                        if expected(1) /= received(1) then
+                            branch := branch + 1;
+                        end if;
+
+                        if expected(0) /= received(0) then
+                            branch := branch + 1;
+                        end if;
+
+                        -- Next state
+                        next_state := b*32 + s/2;
+
+                        candidate := metric(s) + branch;
+
+                        -- Select the survivor path
+                        if candidate < next_metric(next_state) then
+
+                            next_metric(next_state) := candidate;
+                            survivor(t+1, next_state) := s mod 2;
+
+                        end if;
+
+                    end loop;
+                end if;
+            end loop;
+
+            -- Update path metrics
+            for s in 0 to 63 loop
+                metric(s) := next_metric(s);
+            end loop;
+
+        end loop;
+
+        -- Traceback: encoder terminates in state zero
+       
+        -- Traceback from the known final state (zero)
+        best_state := 0;
+
+        for t in STEPS downto 1 loop
+
+            if best_state >= 32 then
+                result_bits(STEPS-t) := '1';
+            else
+                result_bits(STEPS-t) := '0';
+            end if;
+
+            prev_state := (best_state mod 32)*2 +
+                          survivor(t, best_state);
+
+            best_state := prev_state;
+
+        end loop;
+
+        -- Remove the six terminating zero bits
+        decoded_bits <= result_bits(STEPS-1 downto 6);
+
+
+    end process;
+
+end architecture rtl;
+
+--> gf256_mult.VHD
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity gf256_mult is
+    port (
+        a      : in  std_logic_vector(7 downto 0);
+        b      : in  std_logic_vector(7 downto 0);
+        result : out std_logic_vector(7 downto 0)
+    );
+end entity;
+
+architecture rtl of gf256_mult is
+begin
+    process(a, b)
+        variable x   : unsigned(7 downto 0);
+        variable y   : unsigned(7 downto 0);
+        variable res : unsigned(7 downto 0);
+    begin
+        x := unsigned(a);
+        y := unsigned(b);
+        res := (others => '0');
+
+        for i in 0 to 7 loop
+            if y(0) = '1' then
+                res := res xor x;
+            end if;
+
+            if x(7) = '1' then
+                x := shift_left(x, 1) xor to_unsigned(16#87#, 8);
+            else
+                x := shift_left(x, 1);
+            end if;
+
+            y := shift_right(y, 1);
+        end loop;
+
+        result <= std_logic_vector(res);
+    end process;
+end architecture;
+
+--> rs_decode.VHD
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity rs_decoder is
+    port (
+        clk              : in  std_logic;
+        reset            : in  std_logic;
+        start            : in  std_logic;
+        codeword_in      : in  std_logic_vector(2039 downto 0);
+        codeword_out     : out std_logic_vector(2039 downto 0);
+        busy             : out std_logic;
+        done             : out std_logic;
+        error_detect     : out std_logic;
+        correction_valid : out std_logic
+    );
+end entity rs_decoder;
+
+architecture rtl of rs_decoder is
+    type state_type is (IDLE, CALCULATE, CHECK);
+    signal state : state_type := IDLE;
+
+    type symbol_array is array (0 to 254) of std_logic_vector(7 downto 0);
+    type syndrome_array is array (0 to 15) of std_logic_vector(7 downto 0);
+    type locator_array is array (0 to 16) of std_logic_vector(7 downto 0);
+    type position_array is array (0 to 7) of integer range 0 to 254;
+    type field_array is array (0 to 7) of std_logic_vector(7 downto 0);
+    type matrix_row is array (0 to 8) of std_logic_vector(7 downto 0);
+    type matrix_array is array (0 to 7) of matrix_row;
+
+    type decode_result is record
+        corrected : symbol_array;
+        valid     : std_logic;
+        has_error : std_logic;
+    end record;
+
+    signal symbols : symbol_array := (others => (others => '0'));
+    signal syndromes : syndrome_array := (others => (others => '0'));
+    signal index : integer range 0 to 15 := 0;
+    signal bad : std_logic := '0';
+
+    -- GF(256), F(x)=x^8+x^7+x^2+x+1; reduction constant is 0x87.
+    function gf_mult(a, b : std_logic_vector(7 downto 0))
+        return std_logic_vector is
+        variable x : unsigned(7 downto 0) := unsigned(a);
+        variable y : unsigned(7 downto 0) := unsigned(b);
+        variable r : unsigned(7 downto 0) := (others => '0');
+    begin
+        for i in 0 to 7 loop
+            if y(0) = '1' then r := r xor x; end if;
+            if x(7) = '1' then
+                x := shift_left(x, 1) xor to_unsigned(16#87#, 8);
+            else
+                x := shift_left(x, 1);
+            end if;
+            y := shift_right(y, 1);
+        end loop;
+        return std_logic_vector(r);
+    end function;
+
+    function gf_pow_alpha(n : integer) return std_logic_vector is
+        variable v : std_logic_vector(7 downto 0) := x"01";
+    begin
+        for i in 1 to n loop v := gf_mult(v, x"02"); end loop;
+        return v;
+    end function;
+
+    function gf_inverse(a : std_logic_vector(7 downto 0))
+        return std_logic_vector is
+        variable v : std_logic_vector(7 downto 0) := x"01";
+    begin
+        if a = x"00" then return x"00"; end if;
+        for i in 1 to 254 loop v := gf_mult(v, a); end loop;
+        return v;
+    end function;
+
+    function gf_div(a, b : std_logic_vector(7 downto 0))
+        return std_logic_vector is
+    begin
+        if b = x"00" then return x"00"; end if;
+        return gf_mult(a, gf_inverse(b));
+    end function;
+
+    -- CCSDS dual-basis to polynomial-basis conversion matrix.
+    function dual_to_poly(z : std_logic_vector(7 downto 0))
+        return std_logic_vector is
+        type matrix_type is array (0 to 7) of std_logic_vector(7 downto 0);
+        constant M : matrix_type := (
+            "11000101", "01000010", "00101110", "11111101",
+            "11110000", "01111001", "10101100", "11001100");
+        variable u : std_logic_vector(7 downto 0);
+        variable p : std_logic;
+    begin
+        for j in 0 to 7 loop
+            p := '0';
+            for i in 0 to 7 loop
+                if z(7-i) = '1' and M(i)(7-j) = '1' then p := not p; end if;
+            end loop;
+            u(7-j) := p;
+        end loop;
+        return u;
+    end function;
+
+    -- Inverse of the conversion matrix above.
+    function poly_to_dual(u : std_logic_vector(7 downto 0))
+        return std_logic_vector is
+        type matrix_type is array (0 to 7) of std_logic_vector(7 downto 0);
+        constant MI : matrix_type := (
+            "11111110", "01101001", "01101011", "00001101",
+            "11101111", "11110010", "01011011", "11000111");
+        variable z : std_logic_vector(7 downto 0);
+        variable p : std_logic;
+    begin
+        for i in 0 to 7 loop
+            p := '0';
+            for k in 0 to 7 loop
+                if u(7-k) = '1' and MI(i)(7-k) = '1' then p := not p; end if;
+            end loop;
+            z(7-i) := p;
+        end loop;
+        return z;
+    end function;
+
+    function calc_syndrome(syms : symbol_array; root_index : integer)
+        return std_logic_vector is
+        variable s : std_logic_vector(7 downto 0) := (others => '0');
+        variable e : integer;
+        variable a : std_logic_vector(7 downto 0);
+    begin
+        for j in 0 to 254 loop
+            e := ((254-j) * (11*(120+root_index))) mod 255;
+            a := gf_pow_alpha(e);
+            s := s xor gf_mult(syms(j), a);
+        end loop;
+        return s;
+    end function;
+
+    -- Complete algebraic RS decoder: Berlekamp-Massey, Chien search,
+    -- syndrome-equation solve for magnitudes, correction and recheck.
+    function decode_rs(input_symbols : symbol_array; input_syndromes : syndrome_array)
+        return decode_result is
+        variable outv : decode_result;
+        variable c, bpoly, oldc : locator_array;
+        variable l : integer range 0 to 16 := 0;
+        variable m : integer range 1 to 17 := 1;
+        variable d, scale, bprev : std_logic_vector(7 downto 0);
+        variable pos : position_array;
+        variable xpos : field_array;
+        variable found : integer range 0 to 255 := 0;
+        variable z, xval, evalv, power : std_logic_vector(7 downto 0);
+        variable mat : matrix_array;
+        variable tmp : std_logic_vector(7 downto 0);
+        variable pivot : integer;
+        variable pivot_found : boolean;
+        variable mag : field_array;
+        variable ok : boolean := true;
+        variable corrected_tmp : symbol_array;
+    begin
+        outv.corrected := input_symbols;
+        outv.valid := '0';
+        outv.has_error := '0';
+
+        for n in 0 to 15 loop
+            if input_syndromes(n) /= x"00" then outv.has_error := '1'; end if;
+        end loop;
+
+        -- Berlekamp-Massey on the 16 consecutive CCSDS syndromes.
+        c := (others => x"00");
+        bpoly := (others => x"00");
+        c(0) := x"01";
+        bpoly(0) := x"01";
+        bprev := x"01";
+
+        for n in 0 to 15 loop
+            d := input_syndromes(n);
+            for i in 1 to 16 loop
+                if i <= l and i <= n then
+                    d := d xor gf_mult(c(i), input_syndromes(n-i));
+                end if;
+            end loop;
+            if d /= x"00" then
+                oldc := c;
+                scale := gf_div(d, bprev);
+                for i in 0 to 16 loop
+                    if i + m <= 16 then
+                        c(i+m) := c(i+m) xor gf_mult(scale, bpoly(i));
+                    end if;
+                end loop;
+                if 2*l <= n then
+                    l := n + 1 - l;
+                    bpoly := oldc;
+                    bprev := d;
+                    m := 1;
+                elsif m < 17 then
+                    m := m + 1;
+                end if;
+            elsif m < 17 then
+                m := m + 1;
+            end if;
+        end loop;
+
+        if l = 0 then
+            if outv.has_error = '0' then outv.valid := '1'; end if;
+            return outv;
+        end if;
+        if l > 8 then return outv; end if;
+
+        -- Chien search. X_j = alpha^(11*(254-j)); roots are X_j^-1.
+        found := 0;
+        for j in 0 to 254 loop
+            xval := gf_pow_alpha((11*(254-j)) mod 255);
+            z := gf_inverse(xval);
+            evalv := c(0);
+            power := x"01";
+            for i in 1 to 16 loop
+                power := gf_mult(power, z);
+                evalv := evalv xor gf_mult(c(i), power);
+            end loop;
+            if evalv = x"00" then
+                if found < 8 then
+                    pos(found) := j;
+                    xpos(found) := xval;
+                end if;
+                found := found + 1;
+            end if;
+        end loop;
+        if found /= l or found > 8 then return outv; end if;
+
+        -- Solve S_k = sum(error_magnitude_q * X_q^(120+k)) for k=0..l-1.
+        for r in 0 to 7 loop
+            for col in 0 to 8 loop mat(r)(col) := x"00"; end loop;
+        end loop;
+        for r in 0 to l-1 loop
+            for col in 0 to l-1 loop
+                mat(r)(col) := gf_pow_alpha(0);
+                power := gf_pow_alpha((11*(120+r)*(254-pos(col))) mod 255);
+                mat(r)(col) := power;
+            end loop;
+            mat(r)(l) := input_syndromes(r);
+        end loop;
+
+        -- Gaussian elimination over GF(256).
+        for col in 0 to l-1 loop
+            pivot := col;
+            pivot_found := false;
+            for scan_row in 0 to l-1 loop
+                if scan_row >= col and not pivot_found and
+                   mat(scan_row)(col) /= x"00" then
+                    pivot := scan_row;
+                    pivot_found := true;
+                end if;
+            end loop;
+            if not pivot_found then
+                ok := false;
+            else
+                if pivot /= col then
+                    for q in 0 to l loop
+                        tmp := mat(col)(q);
+                        mat(col)(q) := mat(pivot)(q);
+                        mat(pivot)(q) := tmp;
+                    end loop;
+                end if;
+                tmp := gf_inverse(mat(col)(col));
+                for q in col to l loop mat(col)(q) := gf_mult(mat(col)(q), tmp); end loop;
+                for r in 0 to l-1 loop
+                    if r /= col then
+                        tmp := mat(r)(col);
+                        for q in col to l loop
+                            mat(r)(q) := mat(r)(q) xor gf_mult(tmp, mat(col)(q));
+                        end loop;
+                    end if;
+                end loop;
+            end if;
+        end loop;
+        if not ok then return outv; end if;
+
+        for i in 0 to l-1 loop mag(i) := mat(i)(l); end loop;
+        corrected_tmp := input_symbols;
+        for i in 0 to l-1 loop
+            corrected_tmp(pos(i)) := corrected_tmp(pos(i)) xor mag(i);
+        end loop;
+
+        -- Never report success unless all 16 corrected syndromes are zero.
+        for r in 0 to 15 loop
+            if calc_syndrome(corrected_tmp, r) /= x"00" then ok := false; end if;
+        end loop;
+        if ok then
+            outv.corrected := corrected_tmp;
+            outv.valid := '1';
+        end if;
+        return outv;
+    end function;
+
+begin
+    process(clk)
+        variable syndrome : std_logic_vector(7 downto 0);
+        variable exponent : integer range 0 to 254;
+        variable decoded : decode_result;
+        variable output_word : std_logic_vector(2039 downto 0);
+        variable syms_tmp : symbol_array;
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                state <= IDLE;
+                index <= 0;
+                busy <= '0';
+                done <= '0';
+                error_detect <= '0';
+                correction_valid <= '0';
+                codeword_out <= (others => '0');
+                bad <= '0';
+                syndromes <= (others => (others => '0'));
+                symbols <= (others => (others => '0'));
+            else
+                done <= '0';
+                case state is
+                    when IDLE =>
+                        busy <= '0';
+                        if start = '1' then
+                            for i in 0 to 254 loop
+                                symbols(i) <= dual_to_poly(codeword_in(2039-8*i downto 2032-8*i));
+                            end loop;
+                            index <= 0;
+                            bad <= '0';
+                            error_detect <= '0';
+                            correction_valid <= '0';
+                            codeword_out <= codeword_in;
+                            busy <= '1';
+                            state <= CALCULATE;
+                        end if;
+                    when CALCULATE =>
+                        syndrome := (others => '0');
+                        for j in 0 to 254 loop
+                            exponent := ((254-j) * (11*(120+index))) mod 255;
+                            syndrome := syndrome xor gf_mult(symbols(j), gf_pow_alpha(exponent));
+                        end loop;
+                        syndromes(index) <= syndrome;
+                        if syndrome /= x"00" then bad <= '1'; end if;
+                        if index = 15 then
+                            state <= CHECK;
+                        else
+                            index <= index + 1;
+                        end if;
+                    when CHECK =>
+                        syms_tmp := symbols;
+                        decoded := decode_rs(syms_tmp, syndromes);
+                        error_detect <= bad;
+                        correction_valid <= decoded.valid;
+                        if decoded.valid = '1' then
+                            output_word := (others => '0');
+                            for i in 0 to 254 loop
+                                output_word(2039-8*i downto 2032-8*i) := poly_to_dual(decoded.corrected(i));
+                            end loop;
+                            codeword_out <= output_word;
+                        end if;
+                        busy <= '0';
+                        done <= '1';
+                        state <= IDLE;
+                end case;
+            end if;
+        end if;
+    end process;
+end architecture rtl;
+
+--> rs_reference_encoder.VHD
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+-- Reference systematic CCSDS RS(255,239) encoder.
+-- Input and output symbols use the dual-basis byte representation used by rs_decoder.
+-- Data symbols are ordered first; 16 parity symbols are appended.
+entity rs_reference_encoder is
+    port (
+        clk          : in  std_logic;
+        reset        : in  std_logic;
+        start        : in  std_logic;
+        data_in      : in  std_logic_vector(1911 downto 0); -- 239 x 8 bits
+        codeword_out : out std_logic_vector(2039 downto 0); -- 255 x 8 bits
+        busy         : out std_logic;
+        done         : out std_logic
+    );
+end entity;
+
+architecture rtl of rs_reference_encoder is
+    type symbol_array is array (natural range <>) of std_logic_vector(7 downto 0);
+    subtype data_array is symbol_array(0 to 238);
+    subtype code_array is symbol_array(0 to 254);
+    subtype parity_array is symbol_array(0 to 15);
+    subtype gen_array is symbol_array(0 to 16);
+
+    function gf_mult(a, b : std_logic_vector(7 downto 0)) return std_logic_vector is
+        variable x : unsigned(7 downto 0) := unsigned(a);
+        variable y : unsigned(7 downto 0) := unsigned(b);
+        variable r : unsigned(7 downto 0) := (others => '0');
+    begin
+        for i in 0 to 7 loop
+            if y(0) = '1' then r := r xor x; end if;
+            if x(7) = '1' then
+                x := shift_left(x, 1) xor to_unsigned(16#87#, 8);
+            else
+                x := shift_left(x, 1);
+            end if;
+            y := shift_right(y, 1);
+        end loop;
+        return std_logic_vector(r);
+    end function;
+
+    function gf_pow_alpha(n : integer) return std_logic_vector is
+        variable v : std_logic_vector(7 downto 0) := x"01";
+        variable e : integer := n mod 255;
+    begin
+        for i in 1 to e loop v := gf_mult(v, x"02"); end loop;
+        return v;
+    end function;
+
+    -- Same dual-basis -> polynomial-basis map as the supplied decoder.
+    function dual_to_poly(z : std_logic_vector(7 downto 0)) return std_logic_vector is
+        type matrix_type is array (0 to 7) of std_logic_vector(7 downto 0);
+        constant M : matrix_type := (
+            "11000101", "01000010", "00101110", "11111101",
+            "11110000", "01111001", "10101100", "11001100");
+        variable u : std_logic_vector(7 downto 0);
+        variable p : std_logic;
+    begin
+        for j in 0 to 7 loop
+            p := '0';
+            for i in 0 to 7 loop
+                if z(7-i) = '1' and M(i)(7-j) = '1' then p := not p; end if;
+            end loop;
+            u(7-j) := p;
+        end loop;
+        return u;
+    end function;
+
+    -- Same polynomial-basis -> dual-basis map as the supplied decoder.
+    function poly_to_dual(u : std_logic_vector(7 downto 0)) return std_logic_vector is
+        type matrix_type is array (0 to 7) of std_logic_vector(7 downto 0);
+        constant MI : matrix_type := (
+            "11111110", "01101001", "01101011", "00001101",
+            "11101111", "11110010", "01011011", "11000111");
+        variable z : std_logic_vector(7 downto 0);
+        variable p : std_logic;
+    begin
+        for i in 0 to 7 loop
+            p := '0';
+            for k in 0 to 7 loop
+                if u(7-k) = '1' and MI(i)(7-k) = '1' then p := not p; end if;
+            end loop;
+            z(7-i) := p;
+        end loop;
+        return z;
+    end function;
+
+    -- Generator g(x)=product(x + alpha^(11*j)), j=120..135.
+    -- Coefficients are stored in ascending powers: g(0) is the constant term.
+    function make_generator return gen_array is
+        variable g : gen_array := (others => x"00");
+        variable ng : gen_array;
+        variable root : std_logic_vector(7 downto 0);
+    begin
+        g(0) := x"01";
+        for j in 120 to 135 loop
+            root := gf_pow_alpha((11*j) mod 255);
+            ng := (others => x"00");
+            for k in 0 to 16 loop
+                if g(k) /= x"00" then
+                    ng(k) := ng(k) xor gf_mult(g(k), root);
+                    if k < 16 then ng(k+1) := ng(k+1) xor g(k); end if;
+                end if;
+            end loop;
+            g := ng;
+        end loop;
+        return g;
+    end function;
+
+    constant GENERATOR : gen_array := make_generator;
+
+    function encode(data : data_array) return code_array is
+        variable result_word : code_array := (others => x"00");
+        variable parity : parity_array := (others => x"00");
+        variable feedback : std_logic_vector(7 downto 0);
+    begin
+        for i in 0 to 238 loop
+            result_word(i) := data(i);
+            feedback := data(i) xor parity(0);
+            for k in 0 to 14 loop
+                parity(k) := parity(k+1) xor gf_mult(feedback, GENERATOR(15-k));
+            end loop;
+            parity(15) := gf_mult(feedback, GENERATOR(0));
+        end loop;
+        for i in 0 to 15 loop result_word(239+i) := parity(i); end loop;
+        return result_word;
+    end function;
+
+    signal busy_i : std_logic := '0';
+    signal done_i : std_logic := '0';
+begin
+    busy <= busy_i;
+    done <= done_i;
+
+    process(clk)
+        variable data_poly : data_array;
+        variable encoded_poly : code_array;
+        variable output_word : std_logic_vector(2039 downto 0);
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                busy_i <= '0';
+                done_i <= '0';
+                codeword_out <= (others => '0');
+            else
+                done_i <= '0';
+                if start = '1' and busy_i = '0' then
+                    busy_i <= '1';
+                    for i in 0 to 238 loop
+                        data_poly(i) := dual_to_poly(data_in(1911-8*i downto 1904-8*i));
+                    end loop;
+                    encoded_poly := encode(data_poly);
+                    output_word := (others => '0');
+                    for i in 0 to 254 loop
+                        output_word(2039-8*i downto 2032-8*i) := poly_to_dual(encoded_poly(i));
+                    end loop;
+                    codeword_out <= output_word;
+                    busy_i <= '0';
+                    done_i <= '1';
+                end if;
+            end if;
+        end if;
+    end process;
+end architecture;
+
+--> interleaver.VHD
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity interleaver is
+    port (
+        data_in  : in  std_logic_vector(2039 downto 0);
+        data_out : out std_logic_vector(2039 downto 0)
+    );
+end entity;
+
+architecture rtl of interleaver is
+begin
+    process(data_in)
+        variable temp : std_logic_vector(2039 downto 0);
+        variable src  : integer;
+    begin
+        for r in 0 to 254 loop
+            for c in 0 to 7 loop
+                src := 2039 - (r * 8 + c);
+                temp(2039 - (c * 255 + r)) := data_in(src);
+            end loop;
+        end loop;
+
+        data_out <= temp;
+    end process;
+end architecture;
+
+--> deinterleaver.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity deinterleaver is
+    port (
+        data_in  : in  std_logic_vector(2039 downto 0);
+        data_out : out std_logic_vector(2039 downto 0)
+    );
+end entity;
+
+architecture rtl of deinterleaver is
+begin
+    process(data_in)
+        variable temp : std_logic_vector(2039 downto 0);
+        variable dst  : integer;
+    begin
+        for r in 0 to 254 loop
+            for c in 0 to 7 loop
+                dst := 2039 - (r * 8 + c);
+                temp(dst) := data_in(2039 - (c * 255 + r));
+            end loop;
+        end loop;
+
+        data_out <= temp;
+    end process;
+end architecture;
+
+--> tx_chain.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tx_chain is
+    port (
+        clk     : in  std_logic;
+        reset   : in  std_logic;
+        start   : in  std_logic;
+        data_in : in  std_logic_vector(1911 downto 0);
+        tx_bits : out std_logic_vector(4079 downto 0);
+        busy    : out std_logic;
+        done    : out std_logic
+    );
+end entity tx_chain;
+
+architecture rtl of tx_chain is
+
+    signal rs_codeword : std_logic_vector(2039 downto 0);
+    signal interleaved : std_logic_vector(2039 downto 0);
+
+    signal rs_busy : std_logic;
+    signal rs_done : std_logic;
+
+    signal cc_data      : std_logic := '0';
+    signal cc_valid     : std_logic := '0';
+    signal cc_code      : std_logic_vector(1 downto 0);
+    signal cc_valid_out : std_logic;
+
+    signal tx_reg : std_logic_vector(4079 downto 0)
+                   := (others => '0');
+
+    signal bit_index : integer range 0 to 2040 := 0;
+    signal cc_count  : integer range 0 to 2040 := 0;
+
+    signal active   : std_logic := '0';
+    signal finished : std_logic := '0';
+    signal rs_seen  : std_logic := '0';
+
+begin
+
+    rs_inst : entity work.rs_reference_encoder
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => start,
+            data_in      => data_in,
+            codeword_out => rs_codeword,
+            busy         => rs_busy,
+            done         => rs_done
+        );
+
+    int_inst : entity work.interleaver
+        port map (
+            data_in  => rs_codeword,
+            data_out => interleaved
+        );
+
+    cc_inst : entity work.cc_encoder_ref
+        port map (
+            clk       => clk,
+            reset     => reset,
+            data_in   => cc_data,
+            valid_in  => cc_valid,
+            code_out  => cc_code,
+            valid_out => cc_valid_out
+        );
+
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                bit_index <= 0;
+                cc_count  <= 0;
+                active    <= '0';
+                finished  <= '0';
+                rs_seen   <= '0';
+                cc_data   <= '0';
+                cc_valid  <= '0';
+                tx_reg    <= (others => '0');
+
+            else
+                finished <= '0';
+                cc_valid <= '0';
+
+                -- Remember RS encoder completion
+                if rs_done = '1' then
+                    rs_seen <= '1';
+                end if;
+
+                -- Begin serialization after RS encoding completes
+                if rs_seen = '1' and active = '0'
+                   and bit_index = 0 and cc_count = 0 then
+                    active <= '1';
+
+                elsif active = '1' and bit_index < 2040 then
+                    cc_data   <= interleaved(2039 - bit_index);
+                    cc_valid  <= '1';
+                    bit_index <= bit_index + 1;
+                end if;
+
+                -- Capture registered CC output pairs
+                if cc_valid_out = '1' and cc_count < 2040 then
+                    tx_reg(4079 - 2*cc_count downto
+                           4078 - 2*cc_count) <= cc_code;
+
+                    cc_count <= cc_count + 1;
+
+                    if cc_count = 2039 then
+                        active   <= '0';
+                        finished <= '1';
+                    end if;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    tx_bits <= tx_reg;
+    busy    <= rs_busy or active;
+    done    <= finished;
+
+end architecture rtl;
+
+-->viterbi_frame_decoder.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use std.env.all;
+
+entity tb_cc_viterbi is
+end entity;
+
+architecture sim of tb_cc_viterbi is
+
+    constant DATA_BITS : positive := 14;
+    constant STEPS     : positive := DATA_BITS + 6;
+
+    signal clk       : std_logic := '0';
+    signal reset     : std_logic := '1';
+    signal data_in   : std_logic := '0';
+    signal valid_in  : std_logic := '0';
+
+    signal code_out  : std_logic_vector(1 downto 0);
+    signal valid_out : std_logic;
+
+    signal rx_bits   : std_logic_vector(2*STEPS-1 downto 0)
+                       := (others => '0');
+    signal decoded   : std_logic_vector(STEPS-1 downto 0);
+
+    signal dec_start : std_logic := '0';
+    signal dec_busy  : std_logic;
+    signal dec_done  : std_logic;
+
+    constant MESSAGE : std_logic_vector(DATA_BITS-1 downto 0)
+                       := "10110010000000";
+
+    function bits_to_string(
+        v : std_logic_vector
+    ) return string is
+        variable s : string(1 to v'length);
+        variable k : integer := 1;
+    begin
+        for i in v'range loop
+            if v(i) = '0' then
+                s(k) := '0';
+            elsif v(i) = '1' then
+                s(k) := '1';
+            else
+                s(k) := 'X';
+            end if;
+            k := k + 1;
+        end loop;
+        return s;
+    end function;
+
+begin
+
+    clk <= not clk after 5 ns;
+
+    enc: entity work.cc_encoder_ref
+        port map (
+            clk       => clk,
+            reset     => reset,
+            data_in   => data_in,
+            valid_in  => valid_in,
+            code_out  => code_out,
+            valid_out => valid_out
+        );
+
+    dec: entity work.viterbi_frame_decoder
+        generic map (
+            FRAME_BITS => STEPS
+        )
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => dec_start,
+            rx_bits      => rx_bits,
+            decoded_bits => decoded,
+            busy         => dec_busy,
+            done         => dec_done
+        );
+
+    stimulus: process
+        variable frame   : std_logic_vector(STEPS-1 downto 0);
+        variable encoded : std_logic_vector(2*STEPS-1 downto 0);
+    begin
+
+        report "Starting CC + Viterbi single-bit error test"
+            severity note;
+
+        frame := MESSAGE & "000000";
+
+        wait for 20 ns;
+        wait until falling_edge(clk);
+        reset <= '0';
+
+        -- Encode message and six zero tail bits
+        for i in 0 to STEPS-1 loop
+            data_in  <= frame(STEPS-1-i);
+            valid_in <= '1';
+
+            wait until rising_edge(clk);
+            wait for 1 ns;
+
+            assert valid_out = '1'
+                report "FAIL: encoder valid_out was not asserted"
+                severity failure;
+
+            encoded(2*STEPS-1-2*i downto
+                    2*STEPS-2-2*i) := code_out;
+
+            wait until falling_edge(clk);
+        end loop;
+
+        valid_in <= '0';
+
+        -- Inject one channel-bit error
+        encoded(10) := not encoded(10);
+
+        report "Single-bit channel error injected"
+            severity note;
+
+        -- Provide the received frame to the decoder
+        rx_bits <= encoded;
+
+        wait until falling_edge(clk);
+        dec_start <= '1';
+
+        wait until falling_edge(clk);
+        dec_start <= '0';
+
+        -- Wait for the Viterbi decoder to finish
+        wait until dec_done = '1';
+
+        wait for 1 ns;
+
+        report "Expected: " & bits_to_string(MESSAGE)
+            severity note;
+
+        report "Decoded : " &
+            bits_to_string(decoded(STEPS-1 downto 6))
+            severity note;
+
+        assert decoded(STEPS-1 downto 6) = MESSAGE
+            report "FAIL: decoded message differs from original"
+            severity failure;
+
+        assert decoded(5 downto 0) = "000000"
+            report "FAIL: tail bits were not recovered"
+            severity failure;
+
+        report "PASS: CC encoder + Viterbi decoder recovered message after one-bit error"
+            severity note;
+
+        stop;
+        wait;
+    end process;
+
+end architecture;
+
+--> rx_chain.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity rx_chain is
+    port (
+        clk              : in  std_logic;
+        reset            : in  std_logic;
+        start            : in  std_logic;
+        rx_bits          : in  std_logic_vector(4079 downto 0);
+
+        data_out         : out std_logic_vector(1911 downto 0);
+        busy             : out std_logic;
+        done             : out std_logic;
+        error_detect     : out std_logic;
+        correction_valid : out std_logic
+    );
+end entity rx_chain;
+
+architecture rtl of rx_chain is
+
+    type state_type is (IDLE, WAIT_VITERBI, WAIT_RS, COMPLETE);
+    signal state : state_type := IDLE;
+
+    signal vit_start : std_logic := '0';
+    signal vit_busy  : std_logic;
+    signal vit_done  : std_logic;
+
+    signal decoded_bits      : std_logic_vector(2039 downto 0);
+    signal deinterleaved_bits : std_logic_vector(2039 downto 0);
+
+    signal rs_start : std_logic := '0';
+    signal rs_busy  : std_logic;
+    signal rs_done  : std_logic;
+
+    signal corrected_codeword : std_logic_vector(2039 downto 0);
+    signal rs_error           : std_logic;
+    signal rs_correction_valid : std_logic;
+
+begin
+
+    vit_inst : entity work.viterbi_frame_decoder
+        generic map (
+            FRAME_BITS => 2040
+        )
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => vit_start,
+            rx_bits      => rx_bits,
+            decoded_bits => decoded_bits,
+            busy         => vit_busy,
+            done         => vit_done
+        );
+
+    deint_inst : entity work.deinterleaver
+        port map (
+            data_in  => decoded_bits,
+            data_out => deinterleaved_bits
+        );
+
+    rs_inst : entity work.rs_decoder
+        port map (
+            clk              => clk,
+            reset            => reset,
+            start            => rs_start,
+            codeword_in      => deinterleaved_bits,
+            codeword_out     => corrected_codeword,
+            busy             => rs_busy,
+            done             => rs_done,
+            error_detect     => rs_error,
+            correction_valid => rs_correction_valid
+        );
+
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                state            <= IDLE;
+                vit_start        <= '0';
+                rs_start         <= '0';
+                busy             <= '0';
+                done             <= '0';
+                data_out         <= (others => '0');
+                error_detect     <= '0';
+                correction_valid <= '0';
+
+            else
+                vit_start <= '0';
+                rs_start  <= '0';
+
+                case state is
+
+                    when IDLE =>
+                        busy <= '0';
+
+                        if start = '1' then
+                            busy             <= '1';
+                            done             <= '0';
+                            error_detect     <= '0';
+                            correction_valid <= '0';
+                            vit_start        <= '1';
+                            state            <= WAIT_VITERBI;
+                        end if;
+
+                    when WAIT_VITERBI =>
+                        if vit_done = '1' then
+                            rs_start <= '1';
+                            state    <= WAIT_RS;
+                        end if;
+
+                    when WAIT_RS =>
+                        if rs_done = '1' then
+                            data_out         <= corrected_codeword(2039 downto 128);
+                            error_detect     <= rs_error;
+                            correction_valid <= rs_correction_valid;
+                            state            <= COMPLETE;
+                        end if;
+
+                    when COMPLETE =>
+                        busy  <= '0';
+                        done  <= '1';
+                        state <= IDLE;
+
+                end case;
+            end if;
+        end if;
+    end process;
+
+end architecture rtl;
+
+--> deinterleaver_i8.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity deinterleaver_i8 is
+    port (
+        data_in  : in  std_logic_vector(16319 downto 0);
+        data_out : out std_logic_vector(16319 downto 0)
+    );
+end entity deinterleaver_i8;
+
+architecture rtl of deinterleaver_i8 is
+begin
+    process(data_in)
+        variable temp : std_logic_vector(16319 downto 0);
+        variable src  : integer;
+        variable dst  : integer;
+    begin
+        for r in 0 to 254 loop
+            for c in 0 to 7 loop
+                for b in 0 to 7 loop
+                    src := 16319 - ((r * 8 + c) * 8 + b);
+                    dst := 16319 - (c * 2040 + r * 8 + b);
+
+                    temp(dst) := data_in(src);
+                end loop;
+            end loop;
+        end loop;
+
+        data_out <= temp;
+    end process;
+end architecture rtl;
+
+--> rx_chain_i8.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity rx_chain_i8 is
+    port (
+        clk              : in  std_logic;
+        reset            : in  std_logic;
+        start            : in  std_logic;
+        rx_bits          : in  std_logic_vector(32639 downto 0);
+
+        data_out         : out std_logic_vector(15295 downto 0);
+        busy             : out std_logic;
+        done             : out std_logic;
+        error_detect     : out std_logic;
+        correction_valid : out std_logic
+    );
+end entity rx_chain_i8;
+
+architecture rtl of rx_chain_i8 is
+
+    type state_type is (IDLE, WAIT_VITERBI, WAIT_RS, COMPLETE);
+
+    type codeword_array is array (0 to 7) of
+        std_logic_vector(2039 downto 0);
+
+    signal state : state_type := IDLE;
+
+    signal vit_start : std_logic := '0';
+    signal vit_done  : std_logic;
+
+    signal decoded_bits : std_logic_vector(16319 downto 0);
+    signal deinterleaved_bits : std_logic_vector(16319 downto 0);
+
+    signal rs_start : std_logic := '0';
+    signal rs_busy  : std_logic_vector(7 downto 0);
+    signal rs_done  : std_logic_vector(7 downto 0);
+    signal rs_error : std_logic_vector(7 downto 0);
+    signal rs_valid : std_logic_vector(7 downto 0);
+
+    signal rs_input  : codeword_array;
+    signal rs_output : codeword_array;
+
+    signal data_internal : std_logic_vector(15295 downto 0);
+
+begin
+
+    data_out <= data_internal;
+
+    vit_inst : entity work.viterbi_frame_decoder
+        generic map (
+            FRAME_BITS => 16320
+        )
+        port map (
+            clk          => clk,
+            reset        => reset,
+            start        => vit_start,
+            rx_bits      => rx_bits,
+            decoded_bits => decoded_bits,
+            busy         => open,
+            done         => vit_done
+        );
+
+    deint_inst : entity work.deinterleaver_i8
+        port map (
+            data_in  => decoded_bits,
+            data_out => deinterleaved_bits
+        );
+
+    gen_rs : for i in 0 to 7 generate
+
+        rs_input(i) <=
+            deinterleaved_bits(
+                16319 - i*2040 downto
+                16320 - (i+1)*2040
+            );
+
+        rs_inst : entity work.rs_decoder
+            port map (
+                clk              => clk,
+                reset            => reset,
+                start            => rs_start,
+                codeword_in      => rs_input(i),
+                codeword_out     => rs_output(i),
+                busy             => rs_busy(i),
+                done             => rs_done(i),
+                error_detect     => rs_error(i),
+                correction_valid => rs_valid(i)
+            );
+
+        data_internal(
+            15295 - i*1912 downto
+            15296 - (i+1)*1912
+        ) <= rs_output(i)(2039 downto 128);
+
+    end generate;
+
+    process(clk)
+    begin
+        if rising_edge(clk) then
+
+            if reset = '1' then
+
+                state             <= IDLE;
+                vit_start         <= '0';
+                rs_start          <= '0';
+                busy              <= '0';
+                done              <= '0';
+                error_detect      <= '0';
+                correction_valid  <= '0';
+
+            else
+
+                vit_start <= '0';
+                rs_start  <= '0';
+                done      <= '0';
+
+                case state is
+
+                    when IDLE =>
+                        busy <= '0';
+
+                        if start = '1' then
+                            busy              <= '1';
+                            error_detect      <= '0';
+                            correction_valid  <= '0';
+                            vit_start         <= '1';
+                            state             <= WAIT_VITERBI;
+                        end if;
+
+                    when WAIT_VITERBI =>
+                        if vit_done = '1' then
+                            rs_start <= '1';
+                            state    <= WAIT_RS;
+                        end if;
+
+                    when WAIT_RS =>
+                        if rs_done = "11111111" then
+
+                            if rs_error /= "00000000" then
+                                error_detect <= '1';
+                            end if;
+
+                            if rs_valid = "11111111" then
+                                correction_valid <= '1';
+                            end if;
+
+                            state <= COMPLETE;
+                        end if;
+
+                    when COMPLETE =>
+                        busy  <= '0';
+                        done  <= '1';
+                        state <= IDLE;
+
+                end case;
+            end if;
+        end if;
+    end process;
+
+end architecture rtl;
+
+--> tx_chain_i8.vhd
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tx_chain_i8 is
+    port (
+        clk      : in  std_logic;
+        reset    : in  std_logic;
+        start    : in  std_logic;
+
+        data_in  : in  std_logic_vector(15295 downto 0);
+        tx_bits  : out std_logic_vector(32639 downto 0);
+
+        busy     : out std_logic;
+        done     : out std_logic
+    );
+end entity tx_chain_i8;
+
+architecture rtl of tx_chain_i8 is
+
+    type state_type is (
+        IDLE,
+        START_RS,
+        WAIT_RS,
+        PREPARE,
+        PREPARE_WAIT,
+        SEND_BITS,
+        WAIT_CC,
+        COMPLETE
+    );
+
+    type codeword_array is array (0 to 7)
+        of std_logic_vector(2039 downto 0);
+
+    signal state : state_type := IDLE;
+
+    signal codewords : codeword_array :=
+        (others => (others => '0'));
+
+    signal rs_input    : std_logic_vector(1911 downto 0);
+    signal rs_codeword : std_logic_vector(2039 downto 0);
+    signal rs_start    : std_logic := '0';
+    signal rs_done     : std_logic;
+    signal rs_busy     : std_logic;
+
+    signal cc_data      : std_logic := '0';
+    signal cc_valid     : std_logic := '0';
+    signal cc_code      : std_logic_vector(1 downto 0);
+    signal cc_valid_out : std_logic;
+
+    signal tx_reg : std_logic_vector(32639 downto 0) :=
+        (others => '0');
+
+    signal interleaved : std_logic_vector(16319 downto 0) :=
+        (others => '0');
+
+    signal code_index      : integer range 0 to 7 := 0;
+    signal symbol_index    : integer range 0 to 254 := 0;
+    signal codeword_select : integer range 0 to 7 := 0;
+
+    signal bit_index : integer range 0 to 16320 := 0;
+    signal cc_count  : integer range 0 to 16320 := 0;
+
+    signal busy_i : std_logic := '0';
+    signal done_i : std_logic := '0';
+
+begin
+
+    ----------------------------------------------------------------
+    -- Select one 239-byte data block for the RS encoder
+    ----------------------------------------------------------------
+
+    rs_input <= data_in(
+        15295 - code_index * 1912 downto
+        15296 - (code_index + 1) * 1912
+    );
+
+    ----------------------------------------------------------------
+    -- Reed-Solomon encoder
+    ----------------------------------------------------------------
+
+    rs_inst : entity work.rs_reference_encoder
+        port map (
+            clk         => clk,
+            reset       => reset,
+            start       => rs_start,
+            data_in     => rs_input,
+            codeword_out => rs_codeword,
+            busy        => rs_busy,
+            done        => rs_done
+        );
+
+    ----------------------------------------------------------------
+    -- Convolutional encoder, rate 1/2
+    ----------------------------------------------------------------
+
+    cc_inst : entity work.cc_encoder_ref
+        port map (
+            clk       => clk,
+            reset     => reset,
+            data_in   => cc_data,
+            valid_in  => cc_valid,
+            code_out  => cc_code,
+            valid_out => cc_valid_out
+        );
+
+    ----------------------------------------------------------------
+    -- Transmitter controller
+    ----------------------------------------------------------------
+
+    process(clk)
+        variable symbol_pos : integer;
+        variable bit_pos    : integer;
+    begin
+        if rising_edge(clk) then
+
+            if reset = '1' then
+
+                state            <= IDLE;
+                code_index       <= 0;
+                symbol_index     <= 0;
+                codeword_select  <= 0;
+                bit_index        <= 0;
+                cc_count         <= 0;
+
+                rs_start <= '0';
+                cc_data  <= '0';
+                cc_valid <= '0';
+
+                interleaved <= (others => '0');
+                tx_reg      <= (others => '0');
+
+                busy_i <= '0';
+                done_i <= '0';
+
+            else
+
+                rs_start <= '0';
+                cc_valid <= '0';
+                done_i   <= '0';
+
+                ----------------------------------------------------
+                -- Store each convolutionally encoded output pair
+                ----------------------------------------------------
+
+                if cc_valid_out = '1' and cc_count < 16320 then
+
+                    tx_reg(
+                        32639 - 2 * cc_count downto
+                        32638 - 2 * cc_count
+                    ) <= cc_code;
+
+                    cc_count <= cc_count + 1;
+
+                end if;
+
+                ----------------------------------------------------
+                -- Main state machine
+                ----------------------------------------------------
+
+                case state is
+
+                    when IDLE =>
+
+                        if start = '1' then
+                            busy_i          <= '1';
+                            code_index      <= 0;
+                            symbol_index    <= 0;
+                            codeword_select <= 0;
+                            bit_index       <= 0;
+                            cc_count        <= 0;
+
+                            tx_reg      <= (others => '0');
+                            interleaved <= (others => '0');
+
+                            state <= START_RS;
+                        end if;
+
+
+                    when START_RS =>
+
+                        rs_start <= '1';
+                        state    <= WAIT_RS;
+
+
+                    when WAIT_RS =>
+
+                        if rs_done = '1' then
+
+                            codewords(code_index) <= rs_codeword;
+
+                            if code_index = 7 then
+
+                                symbol_index    <= 0;
+                                codeword_select <= 0;
+                                state           <= PREPARE;
+
+                            else
+
+                                code_index <= code_index + 1;
+                                state      <= START_RS;
+
+                            end if;
+
+                        end if;
+
+
+                    when PREPARE =>
+
+                        -- One 8-bit symbol from each RS codeword
+                        -- is placed into the depth-8 interleaver.
+
+                        symbol_pos := 2039 - symbol_index * 8;
+
+                        bit_pos := 16319 -
+                            (symbol_index * 64 +
+                             codeword_select * 8);
+
+                        interleaved(
+                            bit_pos downto bit_pos - 7
+                        ) <= codewords(codeword_select)(
+                            symbol_pos downto symbol_pos - 7
+                        );
+
+                        if codeword_select = 7 then
+
+                            codeword_select <= 0;
+
+                            if symbol_index = 254 then
+
+                                bit_index <= 0;
+                                state     <= PREPARE_WAIT;
+
+                            else
+
+                                symbol_index <= symbol_index + 1;
+
+                            end if;
+
+                        else
+
+                            codeword_select <= codeword_select + 1;
+
+                        end if;
+
+
+                    when PREPARE_WAIT =>
+
+                        -- Allow the final scheduled interleaver
+                        -- signal assignment to settle.
+
+                        bit_index <= 0;
+                        state     <= SEND_BITS;
+
+
+                    when SEND_BITS =>
+
+                        if bit_index < 16320 then
+
+                            cc_data  <= interleaved(16319 - bit_index);
+                            cc_valid <= '1';
+
+                            bit_index <= bit_index + 1;
+
+                            if bit_index = 16319 then
+                                state <= WAIT_CC;
+                            end if;
+
+                        end if;
+
+
+                    when WAIT_CC =>
+
+                        if cc_count = 16320 then
+                            state <= COMPLETE;
+                        end if;
+
+
+                    when COMPLETE =>
+
+                        busy_i <= '0';
+                        done_i <= '1';
+                        state  <= IDLE;
+
+
+                end case;
+
+            end if;
+        end if;
+    end process;
+
+    ----------------------------------------------------------------
+    -- Outputs
+    ----------------------------------------------------------------
+
+    tx_bits <= tx_reg;
+    busy    <= busy_i;
+    done    <= done_i;
+
+end architecture rtl;
+
