@@ -1,0 +1,165 @@
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity viterbi_decoder is
+    generic (
+        DATA_BITS  : positive := 14;
+        TERMINATED : boolean := true
+    );
+    port (
+        rx_bits : in std_logic_vector(2*DATA_BITS-1 downto 0);
+        decoded_bits : out std_logic_vector(DATA_BITS-1 downto 0)
+    );
+end entity viterbi_decoder;
+
+architecture rtl of viterbi_decoder is
+
+    constant STEPS : positive := DATA_BITS;
+    constant INF   : integer := 1000000;
+
+    type metric_array is array (0 to 63) of integer range 0 to INF;
+
+    type survivor_array is array (
+        natural range <>, natural range <>
+    ) of integer range 0 to 1;
+
+begin
+
+    process(rx_bits)
+
+        variable metric      : metric_array;
+        variable next_metric : metric_array;
+        variable survivor    : survivor_array(1 to STEPS, 0 to 63);
+
+        variable state_bits  : std_logic_vector(5 downto 0);
+        variable reg7        : std_logic_vector(6 downto 0);
+
+        variable c1, c2      : std_logic;
+        variable expected    : std_logic_vector(1 downto 0);
+        variable received    : std_logic_vector(1 downto 0);
+
+        variable branch      : integer range 0 to 2;
+        variable candidate   : integer range 0 to INF;
+        variable next_state  : integer range 0 to 63;
+        variable best_state  : integer range 0 to 63;
+        variable prev_state  : integer range 0 to 63;
+
+        variable result_bits : std_logic_vector(STEPS-1 downto 0);
+
+    begin
+
+        -- Initialize path metrics
+        for s in 0 to 63 loop
+            metric(s) := INF;
+        end loop;
+
+        metric(0) := 0;
+
+        -- Forward path-metric calculation
+        for t in 0 to STEPS-1 loop
+
+            for s in 0 to 63 loop
+                next_metric(s) := INF;
+            end loop;
+
+            received := rx_bits(2*STEPS-1-2*t downto
+                                2*STEPS-2-2*t);
+
+            for s in 0 to 63 loop
+
+                if metric(s) < INF then
+
+                    state_bits := std_logic_vector(to_unsigned(s, 6));
+
+                    for b in 0 to 1 loop
+
+                        if b = 0 then
+                            reg7 := '0' & state_bits;
+                        else
+                            reg7 := '1' & state_bits;
+                        end if;
+
+                        -- Generator equations matching cc_encoder_ref
+                        c1 := reg7(6) xor reg7(5) xor
+                              reg7(4) xor reg7(3) xor reg7(0);
+
+                        c2 := not (
+                              reg7(6) xor reg7(4) xor
+                              reg7(3) xor reg7(1) xor reg7(0)
+                        );
+
+                        expected := c1 & c2;
+
+                        -- Hamming distance
+                        branch := 0;
+
+                        if expected(1) /= received(1) then
+                            branch := branch + 1;
+                        end if;
+
+                        if expected(0) /= received(0) then
+                            branch := branch + 1;
+                        end if;
+
+                        -- Next state
+                        next_state := b*32 + s/2;
+
+                        candidate := metric(s) + branch;
+
+                        -- Select the survivor path
+                        if candidate < next_metric(next_state) then
+                            next_metric(next_state) := candidate;
+                            survivor(t+1, next_state) := s mod 2;
+                        end if;
+
+                    end loop;
+                end if;
+            end loop;
+
+            -- Update path metrics
+            for s in 0 to 63 loop
+                metric(s) := next_metric(s);
+            end loop;
+
+        end loop;
+
+        -- Select the final state
+        if TERMINATED then
+            -- Terminated frame ends in state zero
+            best_state := 0;
+        else
+            -- Unterminated frame: choose the lowest-metric state
+            best_state := 0;
+
+            for s in 1 to 63 loop
+                if metric(s) < metric(best_state) then
+                    best_state := s;
+                end if;
+            end loop;
+        end if;
+
+        -- Trace back through the complete frame
+        for t in STEPS downto 1 loop
+
+            if best_state >= 32 then
+                result_bits(STEPS-t) := '1';
+            else
+                result_bits(STEPS-t) := '0';
+            end if;
+
+            prev_state := (best_state mod 32)*2 +
+                          survivor(t, best_state);
+
+            best_state := prev_state;
+
+        end loop;
+
+        -- Return all decoded input bits without trimming
+        decoded_bits <= result_bits;
+
+    end process;
+
+end architecture rtl;
+
